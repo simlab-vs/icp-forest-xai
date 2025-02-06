@@ -1,4 +1,4 @@
-from common import DATA_PATH, Species, TARGET, FEATURES, CATEGORICAL_COLUMNS
+from config import DATA_PATH, Species, TARGET, FEATURES, CATEGORICAL_COLUMNS
 
 import numpy as np
 import polars as pl
@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 
 def load_data(species: Species) -> pl.DataFrame:
     """Load data for the given species.
-    
+
     Parameters
     ----------
     species
         Species to load data for.
-        
+
     Returns
     -------
     Data for the given species.
@@ -34,7 +34,27 @@ def load_data(species: Species) -> pl.DataFrame:
     ).sql(query)
 
 
-def prepare_data(df: pl.DataFrame, plotting: bool = False) -> tuple[pl.DataFrame, pl.Series]:
+def prepare_data(
+    df: pl.DataFrame, restrict_features: list[str] | None = None, plotting: bool = False
+) -> tuple[pl.DataFrame, pl.Series]:
+    """Prepare the data for training.
+
+    We normalize the target variable by fitting a log-normal distribution to it and
+    transforming it to quantiles of the fitted distribution.
+
+    Parameters
+    ----------
+    df
+        Dataframe containing the data.
+    restrict_features
+        Features to include in the model, if None all features are included.
+    plotting
+        Whether to plot the fitted distribution and Q-Q plot.
+
+    Returns
+    -------
+    A tuple containing the features and the transformed target.
+    """
     # Fit a log-normal distribution to the target
     from scipy.stats import lognorm, kstest, probplot
 
@@ -57,7 +77,12 @@ def prepare_data(df: pl.DataFrame, plotting: bool = False) -> tuple[pl.DataFrame
 
         plt.figure(figsize=(10, 6))
         plt.hist(
-            y_plus_one, bins=bins, density=True, alpha=0.6, color="skyblue", label="Data Histogram"
+            y_plus_one,
+            bins=bins.tolist(),
+            density=True,
+            alpha=0.6,
+            color="skyblue",
+            label="Data Histogram",
         )
         plt.plot(x, pdf_fitted, "r-", label="Fitted Log-Normal PDF")
         plt.title("Goodness-of-Fit: Log-Normal Distribution")
@@ -74,7 +99,13 @@ def prepare_data(df: pl.DataFrame, plotting: bool = False) -> tuple[pl.DataFrame
     y_quantiles = lognorm.cdf(y_plus_one, shape, loc, scale)
     y_quantiles = pl.Series(y_quantiles, dtype=pl.Float64)
 
-    return cat_to_codes(df.select(FEATURES), CATEGORICAL_COLUMNS), y_quantiles
+    # Select the features and the transformed target
+    if restrict_features:
+        df = df.select(restrict_features)
+    else:
+        df = df.select(FEATURES)
+
+    return cat_to_codes(df, CATEGORICAL_COLUMNS), y_quantiles
 
 
 def cat_to_codes(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
@@ -88,4 +119,4 @@ def cat_to_codes(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
             pl.col(col).cast(pl.Categorical).to_physical().cast(pl.Int64)
         )
 
-    return df#
+    return df  #

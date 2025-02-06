@@ -13,10 +13,13 @@ SCORING_METRICS = ["r2", "neg_mean_absolute_error"]
 FEATURES = [
     "diameter_end",
     "defoliation_max",
+    "defoliation_min",
     "defoliation_mean",
+    "defoliation_median",
     "social_class_min",
     # "country",
     "plot_latitude",
+    "plot_longitude",
     "plot_slope",
     "plot_orientation",
     "plot_altitude",
@@ -87,10 +90,7 @@ FEATURES = [
 TARGET = "growth_rate_rel"
 
 # Subet of columns that are categorical
-CATEGORICAL_COLUMNS = [
-    "country",
-    "plot_orientation"
-]
+CATEGORICAL_COLUMNS = ["country", "plot_orientation"]
 
 # These parameters have been tuned using Optuna
 LIGHTGBM_PARAMS = {
