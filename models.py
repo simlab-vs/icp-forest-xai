@@ -25,7 +25,33 @@ Estimator = LGBMRegressor
 
 
 @dataclass
-class Result:
+class ExperimentResults:
+    """Results of an experiment.
+
+    Attributes
+    ----------
+    species
+        Species for which the experiment was run.
+    X
+        Dataframe containing the features.
+    metadata
+        Dataframe containing metadata columns (non-feature columns).
+    y_true
+        True target values.
+    y_pred
+        Predicted target values (one series per fold).
+    indices
+        Indices for the training and test sets.
+    estimators
+        Trained estimators.
+    explainers
+        SHAP explainers.
+    performances
+        Performance metrics (one dictionary per fold).
+    shap_values
+        SHAP values (one Explanation object per fold).
+    """
+
     species: Species
 
     X: pl.DataFrame
@@ -40,6 +66,14 @@ class Result:
     performances: list[dict[str, float]]
 
     shap_values: list[Explanation]
+
+    @property
+    def num_folds(self) -> int:
+        return len(self.y_pred)
+
+    @property
+    def features(self) -> list[str]:
+        return self.X.columns
 
     def get_indices(self, fold: int, split: Split) -> np.ndarray | slice:
         """Get indices for the given fold and split."""
@@ -143,8 +177,8 @@ def optimize_hyperparameters(
     A tuple containing the best hyperparameters and the best value found.
     """
     # Check if the study has been cached
-    if use_caching and os.path.exists(f"study-{species}.pkl"):
-        study = joblib.load(f"study-{species}.pkl")
+    if use_caching and os.path.exists(f"./cache/study-{species}.pkl"):
+        study = joblib.load(f"./cache/study-{species}.pkl")
         return study.best_trial.params, study.best_value
 
     # Load data for the given species
@@ -194,7 +228,7 @@ def optimize_hyperparameters(
     print(f"with test R2: {study.best_value}")
 
     if use_caching:
-        joblib.dump(study, f"study-{species}.pkl")
+        joblib.dump(study, f"./cache/study-{species}.pkl")
 
     return study.best_trial.params, study.best_value
 
@@ -205,7 +239,7 @@ def train_and_explain(
     cv: int = 5,
     group_col: str | None = "plot_id",
     n_jobs: int = -1,
-) -> Result:
+) -> ExperimentResults:
     """Train models for the given species.
 
     Parameters
@@ -271,7 +305,7 @@ def train_and_explain(
         explainers.append(explainer)
         shap_values.append(explainer(X.to_numpy()))
 
-    return Result(
+    return ExperimentResults(
         species=species,
         X=X,
         metadata=df.select(pl.selectors.exclude(*FEATURES)),

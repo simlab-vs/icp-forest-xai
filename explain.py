@@ -3,7 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 
-from models import Estimator, Result
+from typing import cast
+
+from models import Estimator, ExperimentResults
 
 import os
 
@@ -81,12 +83,14 @@ def plot_ceteris_paribus_profile(
 
 
 def plot_interaction_matrix(
-    results: Result,
-    fold: int,
+    results: ExperimentResults,
+    *,
+    fold: int | None = None,
     top_n: int | list[str] = 20,
     vbounds: tuple[float, float] = (0, 0.005),
     ax: Axes | None = None,
     use_caching: bool = True,
+    no_plotting: bool = False,
 ) -> np.ndarray:
     """Plot SHAP interaction matrix for the given fold.
 
@@ -95,34 +99,57 @@ def plot_interaction_matrix(
     results
         Results object containing the SHAP values.
     fold
-        Fold index.
+        Fold index to be used. If None, interaction values for all folds are averaged.
     top_n
         Number of features or list of features to include in the plot.
     ax
         Axes object to plot the matrix on. If None, a new figure is created.
     use_caching
         Whether to use caching for the interaction values.
+    no_plotting
+        Whether to plot the matrix (set to only get the results).
 
     Returns
     -------
     SHAP interaction values for the given fold.
     """
-    cache_fname = f"./cache/interactions-{results.species}-{fold}.npy"
 
-    if use_caching and os.path.exists(cache_fname):
-        interactions = np.load(cache_fname)
+    def _get_fold_data(fold: int) -> tuple[np.ndarray, np.ndarray]:
+        cache_fname = f"./cache/interactions-{results.species}-{fold}.npy"
+
+        if use_caching and os.path.exists(cache_fname):
+            interactions = np.load(cache_fname)
+        else:
+            # Get the SHAP interaction values
+            interactions = results.get_shap_interactions(fold, "all")
+
+        if use_caching:
+            np.save(cache_fname, interactions)
+
+        # Get the SHAP values for the feature
+        shap_values = cast(np.ndarray, results.get_shap_values(fold, "all").values)
+
+        assert shap_values.shape[0] == interactions.shape[0]
+
+        return interactions, shap_values
+
+    if fold is None:
+        # Get interaction and SHAP values for all folds
+        interactions, shap_values = zip(
+            *[_get_fold_data(fold) for fold in range(results.num_folds)]
+        )
+
+        # Average the values across folds
+        interactions = np.mean(np.stack(interactions, axis=-1), axis=-1)
+        shap_values = np.mean(np.stack(shap_values, axis=2), axis=-1)
     else:
-        # Get the SHAP interaction values
-        interactions = results.get_shap_interactions(fold, "all")
-
-    if use_caching:
-        np.save(cache_fname, interactions)
-
-    # Get the SHAP values for the feature
-    shap_values = results.get_shap_values(fold, "all").values
+        interactions, shap_values = _get_fold_data(fold)
 
     # Ensure that interaction values sum up to SHAP values
     assert np.all(np.abs(shap_values - np.sum(interactions, axis=2)) < 1e-9)
+
+    if no_plotting:
+        return interactions
 
     # Get the top-n features with the highest interaction values
     if isinstance(top_n, int):
