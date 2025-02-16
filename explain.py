@@ -146,6 +146,8 @@ def plot_interaction_matrix(
         interactions, shap_values = _get_fold_data(fold)
 
     # Ensure that interaction values sum up to SHAP values
+    # This is an important consistency check, especially when loading cached values that
+    # might have been computed for different conditions.
     assert np.all(np.abs(shap_values - np.sum(interactions, axis=2)) < 1e-9)
 
     if no_plotting:

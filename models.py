@@ -177,8 +177,8 @@ def optimize_hyperparameters(
     A tuple containing the best hyperparameters and the best value found.
     """
     # Check if the study has been cached
-    if use_caching and os.path.exists(f"./cache/study-{species}.pkl"):
-        study = joblib.load(f"./cache/study-{species}.pkl")
+    if use_caching and os.path.exists(f"./cache/study-{species}-{group_col}.pkl"):
+        study = joblib.load(f"./cache/study-{species}-{group_col}.pkl")
         return study.best_trial.params, study.best_value
 
     # Load data for the given species
@@ -228,7 +228,7 @@ def optimize_hyperparameters(
     print(f"with test R2: {study.best_value}")
 
     if use_caching:
-        joblib.dump(study, f"./cache/study-{species}.pkl")
+        joblib.dump(study, f"./cache/study-{species}-{group_col}.pkl")
 
     return study.best_trial.params, study.best_value
 
@@ -239,6 +239,7 @@ def train_and_explain(
     cv: int = 5,
     group_col: str | None = "plot_id",
     n_jobs: int = -1,
+    verbosity: int = 0,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -252,8 +253,8 @@ def train_and_explain(
         Column to group by for cross-validation, by default "plot_id".
     n_jobs
         Number of jobs to run in parallel, by default -1.
-    n_samples_interactions
-        Number of samples to use for SHAP interaction values, by default 1000.
+    verbosity
+        Verbosity level of LightGBM, by default 0.
 
     Returns
     -------
@@ -267,6 +268,9 @@ def train_and_explain(
     # Prepare data
     X, y = prepare_data(df)
 
+    # Set verbosity level
+    params = {**params, "verbosity": verbosity}
+
     # Train cv models
     results = cross_validate(
         estimator=LGBMRegressor(**params, force_row_wise=True),
@@ -277,19 +281,18 @@ def train_and_explain(
         cv=KFold(n_splits=cv) if group_col is None else GroupKFold(n_splits=cv),
         n_jobs=n_jobs,
         return_estimator=True,
+        return_train_score=True,
         return_indices=True,
-    )
-
-    r2_mean, r2_std = results["test_r2"].mean(), results["test_r2"].std()
-    mae_mean, mae_std = (
-        -results["test_neg_mean_absolute_error"].mean(),
-        results["test_neg_mean_absolute_error"].std(),
     )
 
     print(f"Finished training model for {species}")
     print("Performance:")
-    print(f" `- R2: {r2_mean:.2f} +/- {r2_std:.2f}")
-    print(f" `- MAE: {mae_mean * 100:.2f}% +/- {mae_std:.2f}%")
+    print(
+        f" `- R2 (test): {results['test_r2'].mean():.2f} +/- {results['test_r2'].std():.2f}"
+    )
+    print(
+        f" `- R2 (train): {results['train_r2'].mean():.2f} +/- {results['train_r2'].std():.2f}"
+    )
 
     # Explain model
     explainers = []
@@ -310,7 +313,9 @@ def train_and_explain(
         X=X,
         metadata=df.select(pl.selectors.exclude(*FEATURES)),
         y_true=y,
-        y_pred=[model.predict(X) for model in results["estimator"]],
+        y_pred=[
+            pl.Series("y_pred", model.predict(X)) for model in results["estimator"]
+        ],
         indices=[
             {
                 "train": results["indices"]["train"][fold],
@@ -322,8 +327,8 @@ def train_and_explain(
         explainers=explainers,
         performances=[
             {
-                "r2": float(results["test_r2"][fold]),
-                "mae": float(-results["test_neg_mean_absolute_error"][fold]),
+                "test_r2": float(results["test_r2"][fold]),
+                "train_r2": float(results["train_r2"][fold]),
             }
             for fold in range(cv)
         ],
