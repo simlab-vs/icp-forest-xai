@@ -7,9 +7,6 @@ Levels = Literal["tree", "plot"]
 # Paths
 DATA_PATH = "./data"
 
-# Scoring metrics
-SCORING_METRICS = ["r2", "neg_mean_absolute_error"]
-
 # Features
 FEATURES_DESCRIPTION = {
     "diameter_end": {
@@ -113,14 +110,25 @@ FEATURES_DESCRIPTION = {
     "soph_avg_age": {"description": "Average age of the trees", "level": "plot"},
     "soph_avg_temp": {"description": "Average temperature", "level": "plot"},
     "soph_avg_precip": {"description": "Average precipitation", "level": "plot"},
+    "defoliation_mean_pred": {
+        "description": "Predicted mean defoliation",
+        "level": "predicted",
+    },
+    "defoliation_mean_residual": {
+        "description": "Residual of the mean defoliation",
+        "level": "predicted",
+    },
 }
 
-# Adjust this list to include the features you want to use
+# Configure the features and target variable
+# NOTE: the final feature set might be slightly different, as we may either drop or construct
+# additional features during the data processing step.
 FEATURES = [
     feature
     for feature, meta in FEATURES_DESCRIPTION.items()
-    # if meta["level"] == "tree"
+    if not feature.startswith("defoliation")
 ]
+# TARGET = "defoliation_mean"
 TARGET = "growth_rate_rel"
 
 # Subet of columns that are categorical

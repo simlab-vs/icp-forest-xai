@@ -1,11 +1,8 @@
 # Train models
-from config import (
-    Species,
-    FEATURES,
-    SCORING_METRICS,
-)
+from config import Species
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
+from sklearn.metrics import make_scorer, mean_pinball_loss, mean_squared_error
 from shap import TreeExplainer, Explanation
 import joblib
 import optuna
@@ -17,11 +14,64 @@ import polars as pl
 
 from dataclasses import dataclass
 from typing import Any, Literal, cast
+from functools import partial
 
 from data import prepare_data, load_data
 
 Split = Literal["train", "test", "all"]
 Estimator = LGBMRegressor
+
+
+def r2_score(
+    y_true: np.ndarray | pl.Series,
+    y_pred: np.ndarray | pl.Series,
+    *,
+    objective: Literal["regression", "quantile"] = "regression",
+    y_ref: np.ndarray | pl.Series | None = None,
+    alpha: float | None = None,
+) -> float:
+    """Compute the R2 score based on a given out-of-sample target vector and loss function.
+
+    Parameters
+    ----------
+    y_true
+        True target values.
+    y_pred
+        Predicted target values.
+    objective
+        Objective to optimize, by default "regression".
+    y_ref
+        In-sample target values (if not provided, y_true is used).
+    alpha
+        Quantile to optimize for (required if `objective` is "quantile").
+
+    Returns
+    -------
+    The R2 score.
+    """
+    if isinstance(y_true, pl.Series):
+        y_true = y_true.to_numpy()
+    if isinstance(y_pred, pl.Series):
+        y_pred = y_pred.to_numpy()
+    if y_ref is not None and isinstance(y_ref, pl.Series):
+        y_ref = y_ref.to_numpy()
+
+    # Reference target values used to compute the baselien predictions
+    y_ref = y_true if y_ref is None else y_ref
+
+    if objective == "regression":
+        loss = mean_squared_error
+        y_base = np.full_like(y_true, np.mean(y_ref))
+    elif objective == "quantile":
+        loss = mean_pinball_loss
+        if alpha is None:
+            raise ValueError("alpha must be provided for quantile regression.")
+
+        y_base = np.full_like(y_true, np.percentile(y_ref, 100 * alpha))
+    else:
+        raise ValueError(f"Invalid objective: {objective}")
+
+    return cast(float, 1 - loss(y_true, y_pred) / loss(y_true, y_base))
 
 
 @dataclass
@@ -75,7 +125,7 @@ class ExperimentResults:
     def features(self) -> list[str]:
         return self.X.columns
 
-    def get_indices(self, fold: int, split: Split) -> np.ndarray | slice:
+    def get_indices(self, fold: int, split: Split) -> np.ndarray:
         """Get indices for the given fold and split."""
         return (
             self.indices[fold][split] if split != "all" else np.arange(self.X.shape[0])
@@ -123,7 +173,9 @@ class ExperimentResults:
 
         return cast(Explanation, self.shap_values[fold][indices])
 
-    def get_shap_interactions(self, fold: int, split: Split = "test") -> np.ndarray:
+    def get_shap_interactions(
+        self, fold: int, split: Split = "test", num_samples: int | None = None
+    ) -> np.ndarray:
         """Get SHAP interaction values for the given fold.
 
         Parameters
@@ -132,12 +184,17 @@ class ExperimentResults:
             Fold index.
         split
             Split type ('train', 'test', or 'all').
+        num_samples
+            Number of samples to use for the SHAP interaction values (None for all samples).
 
         Returns
         -------
         SHAP interaction values for the given fold.
         """
         indices = self.get_indices(fold, split)
+
+        if num_samples is not None:
+            indices = np.random.choice(indices, num_samples, replace=False)
 
         interactions = cast(
             np.ndarray,
@@ -151,6 +208,8 @@ def optimize_hyperparameters(
     species: Species,
     cv: int = 5,
     group_col: str | None = "plot_id",
+    objective: Literal["regression", "quantile"] = "regression",
+    alpha: float = 0.95,
     num_iter: int = 100,
     n_jobs: int = -1,
     use_caching: bool = True,
@@ -165,6 +224,10 @@ def optimize_hyperparameters(
         Number of cross-validation folds, by default 5.
     group_col
         Column to group by for cross-validation, by default "plot_id".
+    objective
+        Objective to optimize, by default "regression".
+    alpha
+        Quantile to optimize for, by default 0.95 (only used if `objective` is "quantile").
     num_iter
         Number of iterations to run, by default 100.
     n_jobs
@@ -187,7 +250,7 @@ def optimize_hyperparameters(
     # Prepare data
     X, y = prepare_data(df)
 
-    def objective(trial: Trial) -> float:
+    def objective_fn(trial: Trial) -> float:
         # See https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html
         grid = {
             # num_leaves is the main parameter to control the complexity of the tree model.
@@ -204,7 +267,11 @@ def optimize_hyperparameters(
             "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
             "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
             "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+            "objective": objective,
         }
+
+        if objective == "quantile":
+            grid["alpha"] = alpha
 
         estimator = LGBMRegressor(**grid, force_row_wise=True, verbose=-1)
 
@@ -213,21 +280,29 @@ def optimize_hyperparameters(
             X=X,
             y=y,
             groups=df[group_col] if group_col is not None else None,
-            scoring=SCORING_METRICS,
+            scoring=make_scorer(
+                partial(r2_score, y_ref=None, objective=objective, alpha=alpha)
+            ),
             cv=KFold(n_splits=cv) if group_col is None else GroupKFold(n_splits=cv),
             n_jobs=n_jobs,
             verbose=False,
         )
 
+        # Rename test and train score keys to test_r2
+        results["test_r2"] = results.pop("test_score")
+
         return results["test_r2"].mean()
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=num_iter)
+    study.optimize(objective_fn, n_trials=num_iter)
 
     print(f"Best parameters found: {study.best_params}")
     print(f"with test R2: {study.best_value}")
 
     if use_caching:
+        if not os.path.exists("./cache"):
+            os.makedirs("./cache")
+
         joblib.dump(study, f"./cache/study-{species}-{group_col}.pkl")
 
     return study.best_trial.params, study.best_value
@@ -262,6 +337,9 @@ def train_and_explain(
     """
     print(f"Training model for {species}")
 
+    objective = params.get("objective", "regression")
+    alpha = params.get("alpha")
+
     # Load data for the given species
     df = load_data(species)
 
@@ -277,13 +355,17 @@ def train_and_explain(
         X=X,
         y=y,
         groups=df[group_col] if group_col is not None else None,
-        scoring=SCORING_METRICS,
+        scoring=make_scorer(partial(r2_score, objective=objective, alpha=alpha)),
         cv=KFold(n_splits=cv) if group_col is None else GroupKFold(n_splits=cv),
         n_jobs=n_jobs,
         return_estimator=True,
         return_train_score=True,
         return_indices=True,
     )
+
+    # Rename test and train score keys to test_r2 and train_r2
+    results["test_r2"] = results.pop("test_score")
+    results["train_r2"] = results.pop("train_score")
 
     print(f"Finished training model for {species}")
     print("Performance:")
@@ -301,7 +383,7 @@ def train_and_explain(
     for estimator in results["estimator"]:
         explainer = TreeExplainer(
             estimator,
-            feature_names=FEATURES,
+            feature_names=X.columns,
             feature_perturbation="tree_path_dependent",
         )
 
@@ -311,7 +393,7 @@ def train_and_explain(
     return ExperimentResults(
         species=species,
         X=X,
-        metadata=df.select(pl.selectors.exclude(*FEATURES)),
+        metadata=df.select(pl.selectors.exclude(*X.columns)),
         y_true=y,
         y_pred=[
             pl.Series("y_pred", model.predict(X)) for model in results["estimator"]

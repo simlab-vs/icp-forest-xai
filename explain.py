@@ -85,12 +85,12 @@ def plot_ceteris_paribus_profile(
 def plot_interaction_matrix(
     results: ExperimentResults,
     *,
+    num_samples: int | None = 20000,
     fold: int | None = None,
     top_n: int | list[str] = 20,
-    vbounds: tuple[float, float] = (0, 0.005),
     ax: Axes | None = None,
     use_caching: bool = True,
-    no_plotting: bool = False,
+    disable_plotting: bool = False,
 ) -> np.ndarray:
     """Plot SHAP interaction matrix for the given fold.
 
@@ -98,6 +98,8 @@ def plot_interaction_matrix(
     ----------
     results
         Results object containing the SHAP values.
+    num_samples
+        Number of samples to use for the SHAP interaction values (None for all samples).
     fold
         Fold index to be used. If None, interaction values for all folds are averaged.
     top_n
@@ -106,7 +108,7 @@ def plot_interaction_matrix(
         Axes object to plot the matrix on. If None, a new figure is created.
     use_caching
         Whether to use caching for the interaction values.
-    no_plotting
+    disable_plotting
         Whether to plot the matrix (set to only get the results).
 
     Returns
@@ -150,7 +152,7 @@ def plot_interaction_matrix(
     # might have been computed for different conditions.
     assert np.all(np.abs(shap_values - np.sum(interactions, axis=2)) < 1e-9)
 
-    if no_plotting:
+    if disable_plotting:
         return interactions
 
     # Get the top-n features with the highest interaction values
@@ -170,12 +172,7 @@ def plot_interaction_matrix(
         plt.figure(figsize=(10, 8))
         ax = plt.gca()
 
-    pcm = ax.imshow(
-        np.absolute(interacts_no_diag).mean(axis=0),
-        cmap="coolwarm",
-        vmin=vbounds[0],
-        vmax=vbounds[1],
-    )
+    pcm = ax.imshow(np.absolute(interacts_no_diag).mean(axis=0), cmap="coolwarm")
     ax.set_xticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
     ax.set_yticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
     ax.tick_params(axis="x", rotation=90)

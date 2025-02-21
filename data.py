@@ -3,6 +3,7 @@ from config import DATA_PATH, Species, TARGET, FEATURES, CATEGORICAL_COLUMNS
 import numpy as np
 import polars as pl
 import os
+import glob
 import matplotlib.pyplot as plt
 
 
@@ -27,15 +28,35 @@ def load_data(species: Species) -> pl.DataFrame:
     elif species == "oak":  # Sessile & Pedunculate Oak
         query = "(specie == 'Quercus petraea') | (specie == 'Quercus robur')"
 
-    query = f"SELECT * FROM self WHERE {query}"
-
-    return pl.read_parquet(
+    data = pl.read_parquet(
         os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
-    ).sql(query)
+    ).sql(f"SELECT * FROM self WHERE {query}")
+
+    if (
+        TARGET == "growth_rate_rel"
+        and len(
+            filenames := glob.glob(
+                os.path.join(
+                    DATA_PATH, "predictions", f"defoliation_mean-{species}-*.npy"
+                )
+            )
+        )
+        > 0
+    ):
+        # Load predicted defoliation values, if available
+        data = data.with_columns(
+            pl.Series(
+                "defoliation_mean_pred",
+                # Average the predictions across folds
+                np.stack([np.load(fn) for fn in filenames], axis=1).mean(axis=1),
+            )
+        )
+
+    return data
 
 
 def prepare_data(
-    df: pl.DataFrame, restrict_features: list[str] | None = None, plotting: bool = False
+    df: pl.DataFrame, plotting: bool = False
 ) -> tuple[pl.DataFrame, pl.Series]:
     """Prepare the data for training.
 
@@ -46,8 +67,6 @@ def prepare_data(
     ----------
     df
         Dataframe containing the data.
-    restrict_features
-        Features to include in the model, if None all features are included.
     plotting
         Whether to plot the fitted distribution and Q-Q plot.
 
@@ -58,7 +77,22 @@ def prepare_data(
     # Fit a log-normal distribution to the target
     from scipy.stats import lognorm, kstest, probplot
 
+    # If we have predicted defoliation, calculate the residuals
+    if "defoliation_mean_pred" in df.columns:
+        df = df.with_columns(
+            defoliation_mean_residual=df["defoliation_mean"]
+            - df["defoliation_mean_pred"]
+        )
+
+    # Select the features and the transformed target
+    X = df.select(FEATURES)
+
+    X = cat_to_codes(X, CATEGORICAL_COLUMNS)
     y = df[TARGET]
+
+    # Apply a log-normal transformation to the target if it is growth rate
+    if TARGET != "growth_rate_rel":
+        return X, y
 
     y_plus_one = y + 1.0
     shape, loc, scale = lognorm.fit(y_plus_one)
@@ -96,16 +130,10 @@ def prepare_data(
         plt.title("Q-Q Plot: Log-Normal Distribution")
 
     # Transform the target to quantiles of the fitted distribution
-    y_quantiles = lognorm.cdf(y_plus_one, shape, loc, scale)
-    y_quantiles = pl.Series(y_quantiles, dtype=pl.Float64)
+    y_log_norm = lognorm.cdf(y_plus_one, shape, loc, scale)
+    y_log_norm = pl.Series(y_log_norm, dtype=pl.Float64)
 
-    # Select the features and the transformed target
-    if restrict_features:
-        df = df.select(restrict_features)
-    else:
-        df = df.select(FEATURES)
-
-    return cat_to_codes(df, CATEGORICAL_COLUMNS), y_quantiles
+    return X, y_log_norm
 
 
 def cat_to_codes(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
