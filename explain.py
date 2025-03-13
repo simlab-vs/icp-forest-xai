@@ -5,7 +5,7 @@ from matplotlib.axes import Axes
 
 from typing import cast
 
-from models import Estimator, ExperimentResults
+from models import Estimator, ExperimentResults, Split
 
 import os
 
@@ -85,13 +85,15 @@ def plot_ceteris_paribus_profile(
 def plot_interaction_matrix(
     results: ExperimentResults,
     *,
-    num_samples: int | None = 20000,
-    fold: int | None = None,
+    num_samples: int | None = 2000,
+    fold: int = 0,
+    split: Split = "all",
     top_n: int | list[str] = 20,
+    vmax: float | None = None,
     ax: Axes | None = None,
     use_caching: bool = True,
     disable_plotting: bool = False,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Plot SHAP interaction matrix for the given fold.
 
     Parameters
@@ -101,9 +103,11 @@ def plot_interaction_matrix(
     num_samples
         Number of samples to use for the SHAP interaction values (None for all samples).
     fold
-        Fold index to be used. If None, interaction values for all folds are averaged.
+        Fold index to be used (by default, the first fold).
     top_n
         Number of features or list of features to include in the plot.
+    vmax
+        Maximum value for the color scale (None for automatic scaling).
     ax
         Axes object to plot the matrix on. If None, a new figure is created.
     use_caching
@@ -113,73 +117,91 @@ def plot_interaction_matrix(
 
     Returns
     -------
-    SHAP interaction values for the given fold.
+    A tuple (interactions, indices) containing the interaction values and the indices of the
+    features.
     """
 
-    def _get_fold_data(fold: int) -> tuple[np.ndarray, np.ndarray]:
-        cache_fname = f"./cache/interactions-{results.species}-{fold}.npy"
-
-        if use_caching and os.path.exists(cache_fname):
-            interactions = np.load(cache_fname)
-        else:
-            # Get the SHAP interaction values
-            interactions = results.get_shap_interactions(fold, "all")
-
+    def _get_fold_data(fold: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Load from cache
         if use_caching:
-            np.save(cache_fname, interactions)
+            try:
+                cached = pl.read_parquet(
+                    os.path.join(
+                        "cache", f"interactions-{results.species}-{fold}.parquet"
+                    )
+                )
+
+                return (
+                    cached["interactions"].to_numpy(),
+                    cached["shap_values"].to_numpy(),
+                    cached["indices"].to_numpy(),
+                )
+            except FileNotFoundError:
+                pass
+
+        # Get the SHAP interaction values
+        interactions, indices = results.get_shap_interactions(fold, split, num_samples)
 
         # Get the SHAP values for the feature
-        shap_values = cast(np.ndarray, results.get_shap_values(fold, "all").values)
+        shap_values = cast(
+            np.ndarray, results.get_shap_values(fold, split).values[indices]
+        )
 
         assert shap_values.shape[0] == interactions.shape[0]
 
-        return interactions, shap_values
+        # Cache the values
+        if use_caching:
+            pl.DataFrame(
+                {
+                    "interactions": interactions,
+                    "shap_values": shap_values,
+                    "indices": indices,
+                }
+            ).write_parquet(
+                os.path.join("cache", f"interactions-{results.species}-{fold}.parquet")
+            )
 
-    if fold is None:
-        # Get interaction and SHAP values for all folds
-        interactions, shap_values = zip(
-            *[_get_fold_data(fold) for fold in range(results.num_folds)]
-        )
+        return interactions, shap_values, indices
 
-        # Average the values across folds
-        interactions = np.mean(np.stack(interactions, axis=-1), axis=-1)
-        shap_values = np.mean(np.stack(shap_values, axis=2), axis=-1)
-    else:
-        interactions, shap_values = _get_fold_data(fold)
+    # Get the data for the fold
+    interactions, shap_values, indices = _get_fold_data(fold)
 
     # Ensure that interaction values sum up to SHAP values
     # This is an important consistency check, especially when loading cached values that
     # might have been computed for different conditions.
     assert np.all(np.abs(shap_values - np.sum(interactions, axis=2)) < 1e-9)
 
-    if disable_plotting:
-        return interactions
+    if not disable_plotting:
+        # Get the top-n features with the highest interaction values
+        if isinstance(top_n, int):
+            top_n_idx = np.argsort(np.absolute(shap_values).mean(axis=0))[::-1][:top_n]
+        else:
+            top_n_idx = [results.X.columns.index(f) for f in top_n]
+            top_n = len(top_n_idx)
 
-    # Get the top-n features with the highest interaction values
-    if isinstance(top_n, int):
-        top_n_idx = np.argsort(np.absolute(shap_values).mean(axis=0))[::-1][:top_n]
-    else:
-        top_n_idx = [results.X.columns.index(f) for f in top_n]
-        top_n = len(top_n_idx)
+        interacts_no_diag = np.vectorize(
+            lambda m: m - np.diag(np.diag(m)), signature="(m, m)->(m, m)"
+        )(interactions)
 
-    interacts_no_diag = np.vectorize(
-        lambda m: m - np.diag(np.diag(m)), signature="(m, m)->(m, m)"
-    )(interactions)
+        interacts_no_diag = interacts_no_diag[:, top_n_idx, :][:, :, top_n_idx]
 
-    interacts_no_diag = interacts_no_diag[:, top_n_idx, :][:, :, top_n_idx]
+        if ax is None:
+            plt.figure(figsize=(10, 8))
+            ax = plt.gca()
 
-    if ax is None:
-        plt.figure(figsize=(10, 8))
-        ax = plt.gca()
+        pcm = ax.imshow(
+            np.absolute(interacts_no_diag).mean(axis=0),
+            cmap="coolwarm",
+            vmin=0.0,
+            vmax=vmax,
+        )
+        ax.set_xticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
+        ax.set_yticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
+        ax.tick_params(axis="x", rotation=90)
 
-    pcm = ax.imshow(np.absolute(interacts_no_diag).mean(axis=0), cmap="coolwarm")
-    ax.set_xticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
-    ax.set_yticks(np.arange(top_n), [results.X.columns[idx] for idx in top_n_idx])
-    ax.tick_params(axis="x", rotation=90)
+        cbar = plt.colorbar(
+            pcm, ax=ax, label="Mean interaction value", shrink=0.8, pad=0.02
+        )
+        cbar.set_label("Mean absolute interaction value")
 
-    cbar = plt.colorbar(
-        pcm, ax=ax, label="Mean interaction value", shrink=0.8, pad=0.02
-    )
-    cbar.set_label("Mean absolute interaction value")
-
-    return interactions
+    return interactions, indices

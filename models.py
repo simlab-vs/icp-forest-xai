@@ -7,6 +7,7 @@ from shap import TreeExplainer, Explanation
 import joblib
 import optuna
 from optuna.trial import Trial
+import warnings
 
 import os
 import numpy as np
@@ -175,7 +176,7 @@ class ExperimentResults:
 
     def get_shap_interactions(
         self, fold: int, split: Split = "test", num_samples: int | None = None
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Get SHAP interaction values for the given fold.
 
         Parameters
@@ -189,11 +190,12 @@ class ExperimentResults:
 
         Returns
         -------
-        SHAP interaction values for the given fold.
+        A tuple (interactions, indices) containing the interaction values and the indices of the
+        features.
         """
         indices = self.get_indices(fold, split)
 
-        if num_samples is not None:
+        if num_samples is not None and num_samples < len(indices):
             indices = np.random.choice(indices, num_samples, replace=False)
 
         interactions = cast(
@@ -201,7 +203,7 @@ class ExperimentResults:
             self.explainers[fold].shap_interaction_values(self.X[indices].to_numpy()),
         )
 
-        return interactions
+        return interactions, indices
 
 
 def optimize_hyperparameters(
@@ -209,7 +211,7 @@ def optimize_hyperparameters(
     cv: int = 5,
     group_col: str | None = "plot_id",
     objective: Literal["regression", "quantile"] = "regression",
-    alpha: float = 0.95,
+    alpha: float | None = None,
     num_iter: int = 100,
     n_jobs: int = -1,
     use_caching: bool = True,
@@ -271,7 +273,12 @@ def optimize_hyperparameters(
         }
 
         if objective == "quantile":
+            if alpha is None:
+                raise ValueError("`alpha` must be provided for quantile regression.")
+
             grid["alpha"] = alpha
+        elif alpha is not None:
+            warnings.warn("`alpha` is ignored for regression.")
 
         estimator = LGBMRegressor(**grid, force_row_wise=True, verbose=-1)
 
