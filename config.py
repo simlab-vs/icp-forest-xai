@@ -9,11 +9,11 @@ DATA_PATH = "./data"
 
 # Features
 FEATURES_DESCRIPTION = {
-    "diameter_end": {
-        "description": "Diameter at the end of the period",
-        "level": "tree",
-        "unit": "cm",
-    },
+    # "diameter_end": {
+    #     "description": "Diameter at the end of the period",
+    #     "level": "tree",
+    #     "unit": "cm",
+    # },
     "defoliation_max": {
         "description": "Maximum defoliation of the growth period",
         "level": "tree",
@@ -338,23 +338,44 @@ FEATURES_DESCRIPTION = {
     "defoliation_mean_pred": {
         "description": "Predicted mean defoliation",
         "level": "predicted",
+        "unit": "%",
     },
     "defoliation_mean_residual": {
         "description": "Residual of the mean defoliation",
         "level": "predicted",
+        "unit": "%",
     },
 }
 
 # Configure the features and target variable
-# NOTE: the final feature set might be slightly different, as we may either drop or construct
-# additional features during the data processing step.
-FEATURES = [
-    feature
-    for feature, meta in FEATURES_DESCRIPTION.items()
-    if meta["level"] != "predicted"
-]
 # TARGET = "defoliation_mean"
 TARGET = "growth_rate_rel"
+
+# NOTE: the final feature set might be slightly different, as we may either drop or construct
+# additional features during the data processing step.
+if TARGET == "defoliation_mean":
+    FEATURES = [
+        feature
+        for feature, _ in FEATURES_DESCRIPTION.items()
+        if "defoliation" not in feature
+    ]
+elif TARGET == "growth_rate_rel":
+    FEATURES = [
+        feature
+        for feature, meta in FEATURES_DESCRIPTION.items()
+        if meta["level"] != "predicted" and "diameter" not in feature
+    ]
+elif TARGET == "growth_rate":
+    FEATURES = [
+        feature
+        for feature, meta in FEATURES_DESCRIPTION.items()
+        if meta["level"] != "predicted"
+    ]
+else:
+    raise ValueError(f"Unknown target variable: {TARGET}")
+
+# Exclude defoliation features (optional)
+# FEATURES = [feature for feature in FEATURES if "defoliation" not in feature]
 
 # Subet of columns that are categorical
 CATEGORICAL_COLUMNS = ["country", "plot_orientation"]

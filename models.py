@@ -9,6 +9,7 @@ import optuna
 from optuna.trial import Trial
 import warnings
 
+import logging
 import os
 import numpy as np
 import polars as pl
@@ -21,6 +22,12 @@ from data import prepare_data, load_data
 
 Split = Literal["train", "test", "all"]
 Estimator = LGBMRegressor
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 def r2_score(
@@ -243,6 +250,7 @@ def optimize_hyperparameters(
     """
     # Check if the study has been cached
     if use_caching and os.path.exists(f"./cache/study-{species}-{group_col}.pkl"):
+        logging.info(f"Loading cached study for {species} with group_col={group_col}.")
         study = joblib.load(f"./cache/study-{species}-{group_col}.pkl")
         return study.best_trial.params, study.best_value
 
