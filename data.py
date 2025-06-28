@@ -29,7 +29,8 @@ def load_data(species: Species) -> pl.DataFrame:
         query = "(specie == 'Quercus petraea') | (specie == 'Quercus robur')"
 
     data = pl.read_parquet(
-        os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
+        # os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
+        os.path.join(DATA_PATH, "tidy", "cpf-level2_cleaned.parquet")
     ).sql(f"SELECT * FROM self WHERE {query}")
 
     if (

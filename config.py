@@ -335,16 +335,6 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "mm",
     },
-    "defoliation_mean_pred": {
-        "description": "Predicted mean defoliation",
-        "level": "predicted",
-        "unit": "%",
-    },
-    "defoliation_mean_residual": {
-        "description": "Residual of the mean defoliation",
-        "level": "predicted",
-        "unit": "%",
-    },
 }
 
 # Configure the features and target variable
@@ -363,14 +353,10 @@ elif TARGET == "growth_rate_rel":
     FEATURES = [
         feature
         for feature, meta in FEATURES_DESCRIPTION.items()
-        if meta["level"] != "predicted" and "diameter" not in feature
+        if "diameter" not in feature
     ]
 elif TARGET == "growth_rate":
-    FEATURES = [
-        feature
-        for feature, meta in FEATURES_DESCRIPTION.items()
-        if meta["level"] != "predicted"
-    ]
+    FEATURES = [feature for feature, meta in FEATURES_DESCRIPTION.items()]
 else:
     raise ValueError(f"Unknown target variable: {TARGET}")
 
