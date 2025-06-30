@@ -1,27 +1,45 @@
 # Train models
+from __future__ import annotations
+
+import sklearn.preprocessing
+
 from config import Species
 from lightgbm import LGBMRegressor
+from sklearn.linear_model import LassoCV, Lasso
+
+import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
-from sklearn.metrics import make_scorer, mean_pinball_loss, mean_squared_error
-from shap import TreeExplainer, Explanation
+from sklearn.metrics import mean_squared_error, make_scorer
+from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
+from shap.maskers import Independent as IndependentMasker
 import joblib
 import optuna
 from optuna.trial import Trial
-import warnings
 
+import sys
+import contextlib
 import logging
 import os
 import numpy as np
 import polars as pl
 
-from dataclasses import dataclass
-from typing import Any, Literal, cast
-from functools import partial
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol, Sequence, cast, overload
 
 from data import prepare_data, load_data
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=".*force_all_finite.*",
+    category=FutureWarning,
+    module="sklearn",
+)
 
 Split = Literal["train", "test", "all"]
-Estimator = LGBMRegressor
+ModelType = Literal["lgbm", "lasso"]
+MatrixLike = np.ndarray | pl.DataFrame
+VectorLike = np.ndarray | pl.Series
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,57 +47,364 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+RANDOM_STATE = 42  # Global random state for reproducibility
+
+np.random.seed(RANDOM_STATE)  # Set the global random seed for NumPy
+
+
+# This is a hack to suppress stderr output from LightGBM
+# It is used to avoid cluttering the output with LightGBM's verbose messages.
+@contextlib.contextmanager
+def suppress_stderr():
+    with open(os.devnull, "w") as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stderr = old_stderr
+
+
+@overload
+def to_numpy(data: MatrixLike | VectorLike) -> np.ndarray: ...
+@overload
+def to_numpy(data: None) -> None: ...
+
+
+def to_numpy(data: MatrixLike | VectorLike | None) -> np.ndarray | None:
+    """Convert data to a NumPy array if it is a Polars DataFrame or Series."""
+    if data is None:
+        return None
+    if isinstance(data, pl.DataFrame):
+        return data.to_numpy()
+    elif isinstance(data, pl.Series):
+        return data.to_numpy()
+    elif isinstance(data, np.ndarray):
+        return data
+    else:
+        raise TypeError(
+            f"Unsupported data type: {type(data)}. Expected DataFrame or Series."
+        )
+
 
 def r2_score(
-    y_true: np.ndarray | pl.Series,
-    y_pred: np.ndarray | pl.Series,
+    y: VectorLike,
+    y_pred: VectorLike,
     *,
-    objective: Literal["regression", "quantile"] = "regression",
-    y_ref: np.ndarray | pl.Series | None = None,
-    alpha: float | None = None,
+    y_ref: VectorLike | None = None,
 ) -> float:
     """Compute the R2 score based on a given out-of-sample target vector and loss function.
 
     Parameters
     ----------
-    y_true
+    y
         True target values.
     y_pred
         Predicted target values.
-    objective
-        Objective to optimize, by default "regression".
     y_ref
-        In-sample target values (if not provided, y_true is used).
-    alpha
-        Quantile to optimize for (required if `objective` is "quantile").
+        In-sample target values (if not provided, y is used).
 
     Returns
     -------
     The R2 score.
     """
-    if isinstance(y_true, pl.Series):
-        y_true = y_true.to_numpy()
-    if isinstance(y_pred, pl.Series):
-        y_pred = y_pred.to_numpy()
-    if y_ref is not None and isinstance(y_ref, pl.Series):
-        y_ref = y_ref.to_numpy()
+    y = to_numpy(y)
+    y_pred = to_numpy(y_pred)
+    y_ref = to_numpy(y_ref)
 
     # Reference target values used to compute the baselien predictions
-    y_ref = y_true if y_ref is None else y_ref
+    y_ref = y if y_ref is None else y_ref
+    y_base = np.full_like(y, np.mean(y_ref))
 
-    if objective == "regression":
-        loss = mean_squared_error
-        y_base = np.full_like(y_true, np.mean(y_ref))
-    elif objective == "quantile":
-        loss = mean_pinball_loss
-        if alpha is None:
-            raise ValueError("alpha must be provided for quantile regression.")
+    return cast(
+        float,
+        1 - mean_squared_error(y, y_pred) / mean_squared_error(y, y_base),
+    )
 
-        y_base = np.full_like(y_true, np.percentile(y_ref, 100 * alpha))
-    else:
-        raise ValueError(f"Invalid objective: {objective}")
 
-    return cast(float, 1 - loss(y_true, y_pred) / loss(y_true, y_base))
+class EstimatorProtocol(Protocol):
+    """Protocol for a regressor that can be used in cross-validation."""
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> EstimatorProtocol:
+        """Fit the regressor to the training data."""
+        ...
+
+    def predict(self, X: MatrixLike) -> VectorLike:
+        """Predict using the fitted regressor."""
+        ...
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]: ...
+
+    def set_params(self, **params: Any) -> EstimatorProtocol:
+        """Set the parameters of the regressor."""
+        ...
+
+    def score(self, X: MatrixLike, y_true: VectorLike) -> float:
+        """Compute the score of the regressor on the given data.
+
+        Parameters
+        ----------
+        X
+            Features to predict on.
+        y_true
+            True target values to compute the score against.
+
+        Returns
+        -------
+        The R2 score of the regressor on the given data."""
+        return r2_score(y_true, self.predict(X))
+
+
+class LGBMEstimator(EstimatorProtocol):
+    """LightGBM regressor."""
+
+    def __init__(
+        self,
+        *,
+        species: Species,
+        group_by: str | None,
+        cv: int = 5,
+        n_jobs: int = -1,
+        random_state: int | None = RANDOM_STATE,
+        verbosity: int = -1,
+        **kwargs: Any,
+    ) -> None:
+        kwargs.pop("force_row_wise", None)  # Remove to avoid warning:
+
+        self._lgbm: LGBMRegressor = LGBMRegressor(
+            verbosity=verbosity,
+            force_row_wise=True,  # Use row-wise tree construction
+            random_state=random_state,
+            **kwargs,
+        )
+
+        self.species = species
+        self.group_by = group_by
+        self.cv = cv
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+
+        self.num_iter = 100
+        self.verbosity = verbosity
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Get the parameters of the regressor."""
+        return {
+            "species": self.species,
+            "group_by": self.group_by,
+            "cv": self.cv,
+            "n_jobs": self.n_jobs,
+            "random_state": self.random_state,
+            "verbosity": self.verbosity,
+            # Include the model parameters
+            **self._lgbm.get_params(deep=deep),
+        }
+
+    def set_params(self, **params: Any) -> LGBMEstimator:
+        """Set the parameters of the regressor."""
+        self.species = params.pop("species", self.species)
+        self.group_by = params.pop("group_by", self.group_by)
+        self.cv = params.pop("cv", self.cv)
+        self.n_jobs = params.pop("n_jobs", self.n_jobs)
+        self.random_state = params.pop("random_state", self.random_state)
+        self.verbosity = params.pop("verbosity", self.verbosity)
+
+        if self._lgbm is None:
+            self._lgbm = LGBMRegressor(**params)
+        else:
+            self._lgbm.set_params(**params)
+
+        return self
+
+    def optimize_hyperparameters(
+        self,
+        X: MatrixLike,
+        y: VectorLike,
+        groups: VectorLike | None = None,
+        use_caching: bool = True,
+    ) -> tuple[dict[str, Any], float]:
+        """Optimize hyperparameters for a given species.
+
+        Parameters
+        ----------
+        use_caching
+            Whether to use caching for the optimization, by default True.
+
+        Returns
+        -------
+        A tuple containing the best hyperparameters and the best value found.
+        """
+        study_name = f"./cache/study-{self.species}-{self.group_by}.pkl"
+
+        # Check if the study has been cached
+        if use_caching and os.path.exists(study_name):
+            logging.info(
+                f"Loading cached study for {self.species} with group_col={self.group_by}."
+            )
+            study = joblib.load(study_name)
+            return study.best_trial.params, study.best_value
+
+        def objective_fn(trial: Trial) -> float:
+            # See https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html
+            grid = {
+                # num_leaves is the main parameter to control the complexity of the tree model.
+                "num_leaves": trial.suggest_int("num_leaves", 2, 256),
+                # max_depth is also used to control the complexity of the tree model.
+                "max_depth": trial.suggest_int("max_depth", -1, 15),
+                # min_data_in_leaf is a parameter to prevent over-fitting in a leaf-wise tree.
+                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 1000),
+                # regularization
+                "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
+                "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
+                "min_split_gain": trial.suggest_float("min_gain_split", 0.0, 1.0),
+                # feature sub-sampling and bagging fractiog
+                "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
+                "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
+                "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+            }
+
+            estimator = LGBMRegressor(
+                **grid,
+                force_row_wise=True,
+                verbosity=self.verbosity,
+                random_state=self.random_state,
+            )
+
+            results = cross_validate(
+                estimator=estimator,
+                X=to_numpy(X),
+                y=to_numpy(y),
+                groups=to_numpy(groups),
+                scoring=make_scorer(r2_score),
+                cv=KFold(n_splits=self.cv)
+                if self.group_by is None
+                else GroupKFold(n_splits=self.cv),
+                n_jobs=self.n_jobs,
+            )
+
+            # Rename test and train score keys to test_r2
+            results["test_r2"] = results.pop("test_score")
+
+            return results["test_r2"].mean()
+
+        study = optuna.create_study(direction="maximize")
+        with suppress_stderr():
+            study.optimize(objective_fn, n_trials=self.num_iter)
+
+        print(f"Best parameters found: {study.best_params}")
+        print(f"with test R2: {study.best_value}")
+
+        if use_caching:
+            if not os.path.exists("./cache"):
+                os.makedirs("./cache")
+
+            joblib.dump(study, study_name)
+
+        return study.best_trial.params, study.best_value
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LGBMEstimator:
+        """Fit the regressor to the training data."""
+        # Extract groups if provided
+        groups = kwargs.get("groups", None)
+
+        if self.group_by is not None and groups is None:
+            raise ValueError(
+                "Group information is required for cross-validation with group_by."
+            )
+
+        # Optimize hyperparameters if not already done
+        best_params, _ = self.optimize_hyperparameters(
+            X, y, groups=groups, use_caching=True
+        )
+
+        self._lgbm.set_params(**best_params)
+        best_params.setdefault("verbosity", self.verbosity)
+
+        # Fit the model using LightGBM
+        self._lgbm.fit(
+            X.to_numpy() if isinstance(X, pl.DataFrame) else X,
+            y.to_numpy() if isinstance(y, pl.Series) else y,
+        )
+
+        return self
+
+    def predict(self, X: MatrixLike) -> VectorLike:
+        """Predict using the fitted regressor."""
+        return self._lgbm.predict(X)  # type: ignore[return-value]
+
+    def get_lgbm(self) -> LGBMRegressor:
+        """Get the underlying LightGBM regressor."""
+        if self._lgbm is None:
+            raise ValueError("Model has not been fitted yet.")
+        return self._lgbm
+
+
+class LassoEstimator(EstimatorProtocol):
+    """Lasso regressor."""
+
+    def __init__(
+        self,
+        *,
+        species: Species,
+        group_by: str | None = None,
+        cv: int = 5,
+        **kwargs: Any,
+    ):
+        """Initialize the LassoCV regressor."""
+        self.species = species
+        self.group_by = group_by
+        self.cv = cv
+        self.lasso_kwargs = kwargs.copy()
+
+        self._model = None
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Get the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.get_params(deep=deep)
+
+    def set_params(self, **params: Any) -> LassoEstimator:
+        """Set the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        self._model.set_params(**params)
+        return self
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LassoEstimator:
+        """Fit the regressor to the training data."""
+        # Extract groups if provided
+        groups = kwargs.get("groups", None)
+
+        # Use LassoCV for cross-validating the optimal alpha
+        lasso_cv = LassoCV(
+            cv=GroupKFold(n_splits=self.cv)
+            if self.group_by is not None
+            else KFold(n_splits=self.cv),
+            verbose=False,
+            **self.lasso_kwargs,
+        )
+
+        lasso_cv.fit(X, y, groups=to_numpy(groups))
+        self._model = Lasso(alpha=lasso_cv.alpha_).fit(X, y)
+
+        return self
+
+    def predict(self, X: MatrixLike) -> VectorLike:
+        """Predict using the fitted regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.predict(X)
+
+    def get_sklearn(self) -> Lasso:
+        """Get the underlying Lasso regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model
 
 
 @dataclass
@@ -115,15 +440,15 @@ class ExperimentResults:
     X: pl.DataFrame
     metadata: pl.DataFrame
     y_true: pl.Series
-    y_pred: list[pl.Series]
+    y_pred: Sequence[pl.Series]
 
-    indices: list[dict[Split, np.ndarray]]
-    estimators: list[LGBMRegressor]
-    explainers: list[TreeExplainer]
+    indices: Sequence[dict[Split, np.ndarray]]
+    estimators: Sequence[EstimatorProtocol]
+    explainers: Sequence[Explainer]
 
-    performances: list[dict[str, float]]
+    performances: Sequence[dict[str, float]]
 
-    shap_values: list[Explanation]
+    shap_values: Sequence[Explanation]
 
     @property
     def num_folds(self) -> int:
@@ -177,14 +502,24 @@ class ExperimentResults:
         -------
         SHAP values for the given fold and split.
         """
+        shap_values = self.shap_values[fold]
+
+        if shap_values is None:
+            raise ValueError(
+                f"No SHAP values available for fold {fold}. "
+                "Ensure that the model was trained with SHAP explanations."
+            )
+
         indices = self.get_indices(fold, split)
 
-        return cast(Explanation, self.shap_values[fold][indices])
+        return cast(Explanation, shap_values[indices])
 
     def get_shap_interactions(
         self, fold: int, split: Split = "test", num_samples: int | None = None
     ) -> tuple[np.ndarray, np.ndarray]:
         """Get SHAP interaction values for the given fold.
+
+        Note: this is only available for tree-based models (e.g., LightGBM).
 
         Parameters
         ----------
@@ -200,6 +535,19 @@ class ExperimentResults:
         A tuple (interactions, indices) containing the interaction values and the indices of the
         features.
         """
+        explainer = self.explainers[fold]
+
+        if explainer is None:
+            raise ValueError(
+                f"No SHAP explainer available for fold {fold}. "
+                "Ensure that the model was trained with SHAP explanations."
+            )
+
+        if not isinstance(explainer, TreeExplainer):
+            raise ValueError(
+                "SHAP interaction values are only available for tree-based models. "
+            )
+
         indices = self.get_indices(fold, split)
 
         if num_samples is not None and num_samples < len(indices):
@@ -207,129 +555,30 @@ class ExperimentResults:
 
         interactions = cast(
             np.ndarray,
-            self.explainers[fold].shap_interaction_values(self.X[indices].to_numpy()),
+            explainer.shap_interaction_values(self.X[indices].to_numpy()),
         )
 
         return interactions, indices
 
 
-def optimize_hyperparameters(
-    species: Species,
-    cv: int = 5,
-    group_col: str | None = "plot_id",
-    objective: Literal["regression", "quantile"] = "regression",
-    alpha: float | None = None,
-    num_iter: int = 100,
-    n_jobs: int = -1,
-    use_caching: bool = True,
-) -> tuple[dict[str, float], float]:
-    """Optimize hyperparameters for a given species.
-
-    Parameters
-    ----------
-    species
-        Species to optimize hyperparameters for.
-    cv
-        Number of cross-validation folds, by default 5.
-    group_col
-        Column to group by for cross-validation, by default "plot_id".
-    objective
-        Objective to optimize, by default "regression".
-    alpha
-        Quantile to optimize for, by default 0.95 (only used if `objective` is "quantile").
-    num_iter
-        Number of iterations to run, by default 100.
-    n_jobs
-        Number of jobs to run in parallel, by default -1.
-    use_caching
-        Whether to use caching for the optimization, by default True.
-
-    Returns
-    -------
-    A tuple containing the best hyperparameters and the best value found.
-    """
-    # Check if the study has been cached
-    if use_caching and os.path.exists(f"./cache/study-{species}-{group_col}.pkl"):
-        logging.info(f"Loading cached study for {species} with group_col={group_col}.")
-        study = joblib.load(f"./cache/study-{species}-{group_col}.pkl")
-        return study.best_trial.params, study.best_value
-
-    # Load data for the given species
-    df = load_data(species)
-
-    # Prepare data
-    X, y = prepare_data(df)
-
-    def objective_fn(trial: Trial) -> float:
-        # See https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html
-        grid = {
-            # num_leaves is the main parameter to control the complexity of the tree model.
-            "num_leaves": trial.suggest_int("num_leaves", 2, 256),
-            # max_depth is also used to control the complexity of the tree model.
-            "max_depth": trial.suggest_int("max_depth", -1, 15),
-            # min_data_in_leaf is a parameter to prevent over-fitting in a leaf-wise tree.
-            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 1000),
-            # regularization
-            "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
-            "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
-            "min_split_gain": trial.suggest_float("min_gain_split", 0.0, 1.0),
-            # feature sub-sampling and bagging fractiog
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
-            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-            "objective": objective,
-        }
-
-        if objective == "quantile":
-            if alpha is None:
-                raise ValueError("`alpha` must be provided for quantile regression.")
-
-            grid["alpha"] = alpha
-        elif alpha is not None:
-            warnings.warn("`alpha` is ignored for regression.")
-
-        estimator = LGBMRegressor(**grid, force_row_wise=True, verbose=-1)
-
-        results = cross_validate(
-            estimator=estimator,
-            X=X,
-            y=y,
-            groups=df[group_col] if group_col is not None else None,
-            scoring=make_scorer(
-                partial(r2_score, y_ref=None, objective=objective, alpha=alpha)
-            ),
-            cv=KFold(n_splits=cv) if group_col is None else GroupKFold(n_splits=cv),
-            n_jobs=n_jobs,
-            verbose=False,
-        )
-
-        # Rename test and train score keys to test_r2
-        results["test_r2"] = results.pop("test_score")
-
-        return results["test_r2"].mean()
-
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective_fn, n_trials=num_iter)
-
-    print(f"Best parameters found: {study.best_params}")
-    print(f"with test R2: {study.best_value}")
-
-    if use_caching:
-        if not os.path.exists("./cache"):
-            os.makedirs("./cache")
-
-        joblib.dump(study, f"./cache/study-{species}-{group_col}.pkl")
-
-    return study.best_trial.params, study.best_value
+@dataclass
+class CrossValidationResults:
+    test_r2: list[float] = field(default_factory=list)
+    train_r2: list[float] = field(default_factory=list)
+    estimator: list[EstimatorProtocol] = field(default_factory=list)
+    indices: dict[Split, list[pl.Series]] = field(
+        default_factory=lambda: {"train": [], "test": []}
+    )
 
 
 def train_and_explain(
     species: Species,
-    params: dict[str, Any],
+    *,
+    model_type: ModelType,
+    group_by: str | None,
     cv: int = 5,
-    group_col: str | None = "plot_id",
     n_jobs: int = -1,
-    verbosity: int = 0,
+    random_state: int = RANDOM_STATE,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -337,14 +586,16 @@ def train_and_explain(
     ----------
     species
         Species to train the model for.
+    model_type
+        Type of model to use for training, either "lgbm" or "lasso".
+    group_by
+        Column to group by for cross-validation.
     cv
         Number of cross-validation folds, by default 5.
-    group_col
-        Column to group by for cross-validation, by default "plot_id".
     n_jobs
         Number of jobs to run in parallel, by default -1.
-    verbosity
-        Verbosity level of LightGBM, by default 0.
+    random_state
+        Random state for reproducibility, by default RANDOM_STATE.
 
     Returns
     -------
@@ -352,55 +603,123 @@ def train_and_explain(
     """
     print(f"Training model for {species}")
 
-    objective = params.get("objective", "regression")
-    alpha = params.get("alpha")
-
     # Load data for the given species
     df = load_data(species)
 
     # Prepare data
     X, y = prepare_data(df)
 
-    # Set verbosity level
-    params = {**params, "verbosity": verbosity}
+    # Prepare groups
+    if group_by is not None:
+        groups = df.select(group_by).to_series()
+    else:
+        groups = None
 
-    # Train cv models
-    results = cross_validate(
-        estimator=LGBMRegressor(**params, force_row_wise=True),
-        X=X,
-        y=y,
-        groups=df[group_col] if group_col is not None else None,
-        scoring=make_scorer(partial(r2_score, objective=objective, alpha=alpha)),
-        cv=KFold(n_splits=cv) if group_col is None else GroupKFold(n_splits=cv),
-        n_jobs=n_jobs,
-        return_estimator=True,
-        return_train_score=True,
-        return_indices=True,
-    )
+    # Create estimator
+    if model_type == "lgbm":
+        model = LGBMEstimator(
+            species=species,
+            group_by=group_by,
+            cv=cv,
+            n_jobs=n_jobs,
+        )
+    elif model_type == "lasso":
+        # Enable metadata routing for LassoCV to handle group information
+        sklearn.set_config(enable_metadata_routing=True)
 
-    # Rename test and train score keys to test_r2 and train_r2
-    results["test_r2"] = results.pop("test_score")
-    results["train_r2"] = results.pop("train_score")
+        model = LassoEstimator(
+            species=species,
+            group_by=group_by,
+            cv=cv,
+            n_jobs=n_jobs,
+            max_iter=25000,
+        )
 
-    print(f"Finished training model for {species}")
-    print("Performance:")
+        # Input NaNs are not allowed in LassoCV, so we need to impute them
+        X = X.fill_null(0)
+
+        # Standardize the features
+        X = pl.DataFrame(
+            sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
+            schema=X.schema,
+        )
+    else:
+        raise ValueError(
+            f"Unknown estimator: {model_type}. Supported estimators are 'lgbm' and 'lasso'."
+        )
+
+    # Cross-validation loop
+    print(f"Starting cross-validation for {species} with {model_type} estimator...")
+
+    results = CrossValidationResults()
+    splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+    for fold, (train_idx, test_idx) in enumerate(
+        splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+    ):
+        print(f"Fold {fold + 1}/{cv}")
+
+        # Split data into training and test sets
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        # Fit the model
+        model.fit(
+            X_train,
+            y_train,
+            groups=to_numpy(groups[train_idx]) if groups is not None else None,
+        )
+
+        # Evaluate the model
+        r2_train = model.score(X_train, y_train)
+        r2_test = model.score(X_test, y_test)
+
+        # Update cross-validation results
+        results.test_r2.append(r2_test)
+        results.train_r2.append(r2_train)
+        results.estimator.append(model)
+        results.indices["train"].append(pl.Series("train_idx", train_idx))
+        results.indices["test"].append(pl.Series("test_idx", test_idx))
+
+        # Print R2 score for the fold
+        print(
+            f"Fold {fold + 1}: R2 (train) = {r2_train:.2f}, R2 (test) = {r2_test:.2f}"
+        )
+
+    print(f"Cross-validation completed for {species} with {model_type} estimator.")
+
+    print("Summary of results:")
     print(
-        f" `- R2 (test): {results['test_r2'].mean():.2f} +/- {results['test_r2'].std():.2f}"
+        f" `- R2 (test): {np.mean(results.test_r2):.2f} +/- {np.std(results.test_r2):.2f}"
     )
     print(
-        f" `- R2 (train): {results['train_r2'].mean():.2f} +/- {results['train_r2'].std():.2f}"
+        f" `- R2 (train): {np.mean(results.train_r2):.2f} +/- {np.std(results.train_r2):.2f}"
     )
 
-    # Explain model
+    # Create SHAP explainers for the trained models
     explainers = []
     shap_values = []
 
-    for estimator in results["estimator"]:
-        explainer = TreeExplainer(
-            estimator,
-            feature_names=X.columns,
-            feature_perturbation="tree_path_dependent",
-        )
+    X_background = X.sample(1000, with_replacement=False)
+
+    for estimator in results.estimator:
+        # Create a SHAP explainer for the LGBM model
+        if isinstance(estimator, LGBMEstimator):
+            explainer = TreeExplainer(
+                estimator.get_lgbm(),
+                feature_names=X.columns,
+                feature_perturbation="tree_path_dependent",
+            )
+        elif isinstance(estimator, LassoEstimator):
+            explainer = LinearExplainer(
+                estimator.get_sklearn(),
+                feature_names=X.columns,
+                masker=IndependentMasker(to_numpy(X_background)),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported estimator type: {type(estimator)}. "
+                "Supported types are LGBMEstimator and LassoEstimator."
+            )
 
         explainers.append(explainer)
         shap_values.append(explainer(X.to_numpy()))
@@ -410,22 +729,20 @@ def train_and_explain(
         X=X,
         metadata=df.select(pl.selectors.exclude(*X.columns)),
         y_true=y,
-        y_pred=[
-            pl.Series("y_pred", model.predict(X)) for model in results["estimator"]
-        ],
+        y_pred=[pl.Series("y_pred", model.predict(X)) for model in results.estimator],
         indices=[
             {
-                "train": results["indices"]["train"][fold],
-                "test": results["indices"]["test"][fold],
+                "train": results.indices["train"][fold].to_numpy(),
+                "test": results.indices["test"][fold].to_numpy(),
             }
             for fold in range(cv)
         ],
-        estimators=results["estimator"],
+        estimators=results.estimator,
         explainers=explainers,
         performances=[
             {
-                "test_r2": float(results["test_r2"][fold]),
-                "train_r2": float(results["train_r2"][fold]),
+                "test_r2": float(results.test_r2[fold]),
+                "train_r2": float(results.train_r2[fold]),
             }
             for fold in range(cv)
         ],

@@ -88,7 +88,7 @@ def prepare_data(
     # Select the features and the transformed target
     X = df.select(FEATURES)
 
-    X = cat_to_codes(X, CATEGORICAL_COLUMNS)
+    X = cat_to_codes(X, CATEGORICAL_COLUMNS).fill_nan(None)
     y = df[TARGET]
 
     # Apply a log-normal transformation to the target if it is growth rate

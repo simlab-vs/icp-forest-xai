@@ -5,13 +5,13 @@ from matplotlib.axes import Axes
 
 from typing import cast
 
-from models import Estimator, ExperimentResults, Split
+from models import EstimatorProtocol, ExperimentResults, Split
 
 import os
 
 
 def plot_ceteris_paribus_profile(
-    estimator: Estimator,
+    estimator: EstimatorProtocol,
     X: pl.DataFrame,
     instance_id: int,
     feature: str,
