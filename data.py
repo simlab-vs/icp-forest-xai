@@ -1,10 +1,53 @@
-from config import DATA_PATH, Species, TARGET, FEATURES, CATEGORICAL_COLUMNS
+from config import (
+    DATA_PATH,
+    Species,
+    TARGET,
+    CATEGORICAL_COLUMNS,
+    Ablation,
+    FEATURES_DESCRIPTION,
+)
 
 import numpy as np
 import polars as pl
 import os
 import glob
 import matplotlib.pyplot as plt
+
+from typing import Sequence
+
+
+def perform_ablation(ablation: Ablation, features: Sequence[str]) -> Sequence[str]:
+    """
+    Perform ablation on the features based on the specified ablation type.
+
+    Parameters:
+    - ablation (Ablation): The type of ablation to perform.
+    - features (list[str]): The list of features to ablate.
+
+    Returns:
+    The ablated list of features.
+    """
+    if ablation == "all":
+        return features
+    elif ablation == "no-defoliation":
+        return [feature for feature in features if "defoliation" not in feature]
+    elif ablation == "tree-level-only":
+        return [
+            feature
+            for feature in features
+            if FEATURES_DESCRIPTION[feature]["level"] == "tree"
+        ]
+    elif ablation == "plot-level-only":
+        return [
+            feature
+            for feature in features
+            if FEATURES_DESCRIPTION[feature]["level"] == "plot"
+        ]
+    else:
+        raise ValueError(
+            f"Unknown ablation type: {ablation}. "
+            f"Expected one of: 'all', 'tree-level-only', 'plot-level-only', 'no-defoliation'."
+        )
 
 
 def load_data(species: Species) -> pl.DataFrame:
@@ -57,7 +100,7 @@ def load_data(species: Species) -> pl.DataFrame:
 
 
 def prepare_data(
-    df: pl.DataFrame, plotting: bool = False
+    df: pl.DataFrame, ablation: Ablation = "all", plotting: bool = False
 ) -> tuple[pl.DataFrame, pl.Series]:
     """Prepare the data for training.
 
@@ -68,6 +111,8 @@ def prepare_data(
     ----------
     df
         Dataframe containing the data.
+    ablation
+        Ablation to apply to the data. If "all", no ablation is applied.
     plotting
         Whether to plot the fitted distribution and Q-Q plot.
 
@@ -86,7 +131,7 @@ def prepare_data(
         )
 
     # Select the features and the transformed target
-    X = df.select(FEATURES)
+    X = df.select(perform_ablation(ablation, list(FEATURES_DESCRIPTION.keys())))
 
     X = cat_to_codes(X, CATEGORICAL_COLUMNS).fill_nan(None)
     y = df[TARGET]

@@ -341,27 +341,8 @@ FEATURES_DESCRIPTION = {
 # TARGET = "defoliation_mean"
 TARGET = "growth_rate_rel"
 
-# NOTE: the final feature set might be slightly different, as we may either drop or construct
-# additional features during the data processing step.
-if TARGET == "defoliation_mean":
-    FEATURES = [
-        feature
-        for feature, _ in FEATURES_DESCRIPTION.items()
-        if "defoliation" not in feature
-    ]
-elif TARGET == "growth_rate_rel":
-    FEATURES = [
-        feature
-        for feature, meta in FEATURES_DESCRIPTION.items()
-        if "diameter" not in feature
-    ]
-elif TARGET == "growth_rate":
-    FEATURES = [feature for feature, meta in FEATURES_DESCRIPTION.items()]
-else:
-    raise ValueError(f"Unknown target variable: {TARGET}")
+Ablation = Literal["all", "tree-level-only", "plot-level-only", "no-defoliation"]
 
-# Exclude defoliation features (optional)
-# FEATURES = [feature for feature in FEATURES if "defoliation" not in feature]
 
 # Subet of columns that are categorical
 CATEGORICAL_COLUMNS = ["country", "plot_orientation"]

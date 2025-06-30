@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sklearn.preprocessing
 
-from config import Species
+from config import Ablation, Species
 from lightgbm import LGBMRegressor
 from sklearn.linear_model import LassoCV, Lasso
 
@@ -221,6 +221,7 @@ class LGBMEstimator(EstimatorProtocol):
         X: MatrixLike,
         y: VectorLike,
         groups: VectorLike | None = None,
+        ablation: Ablation = "all",
         use_caching: bool = True,
     ) -> tuple[dict[str, Any], float]:
         """Optimize hyperparameters for a given species.
@@ -234,7 +235,7 @@ class LGBMEstimator(EstimatorProtocol):
         -------
         A tuple containing the best hyperparameters and the best value found.
         """
-        study_name = f"./cache/study-{self.species}-{self.group_by}.pkl"
+        study_name = f"./cache/study-{self.species}-{self.group_by}-{ablation}.pkl"
 
         # Check if the study has been cached
         if use_caching and os.path.exists(study_name):
@@ -306,6 +307,7 @@ class LGBMEstimator(EstimatorProtocol):
         """Fit the regressor to the training data."""
         # Extract groups if provided
         groups = kwargs.get("groups", None)
+        ablation = kwargs.get("ablation", "all")
 
         if self.group_by is not None and groups is None:
             raise ValueError(
@@ -314,7 +316,7 @@ class LGBMEstimator(EstimatorProtocol):
 
         # Optimize hyperparameters if not already done
         best_params, _ = self.optimize_hyperparameters(
-            X, y, groups=groups, use_caching=True
+            X, y, ablation=ablation, groups=groups, use_caching=True
         )
 
         self._lgbm.set_params(**best_params)
@@ -575,10 +577,10 @@ def train_and_explain(
     species: Species,
     *,
     model_type: ModelType,
+    ablation: Ablation = "all",
     group_by: str | None,
     cv: int = 5,
     n_jobs: int = -1,
-    random_state: int = RANDOM_STATE,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -594,8 +596,6 @@ def train_and_explain(
         Number of cross-validation folds, by default 5.
     n_jobs
         Number of jobs to run in parallel, by default -1.
-    random_state
-        Random state for reproducibility, by default RANDOM_STATE.
 
     Returns
     -------
@@ -607,7 +607,7 @@ def train_and_explain(
     df = load_data(species)
 
     # Prepare data
-    X, y = prepare_data(df)
+    X, y = prepare_data(df, ablation)
 
     # Prepare groups
     if group_by is not None:
@@ -617,6 +617,8 @@ def train_and_explain(
 
     # Create estimator
     if model_type == "lgbm":
+        sklearn.set_config(enable_metadata_routing=False)
+
         model = LGBMEstimator(
             species=species,
             group_by=group_by,
@@ -667,6 +669,7 @@ def train_and_explain(
             X_train,
             y_train,
             groups=to_numpy(groups[train_idx]) if groups is not None else None,
+            ablation=ablation,
         )
 
         # Evaluate the model
