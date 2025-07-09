@@ -1,10 +1,75 @@
-from config import DATA_PATH, Species, TARGET, FEATURES, CATEGORICAL_COLUMNS
+from config import (
+    DATA_PATH,
+    Species,
+    TARGET,
+    CATEGORICAL_COLUMNS,
+    Ablation,
+    FEATURES_DESCRIPTION,
+)
 
 import numpy as np
 import polars as pl
 import os
-import glob
+import re
+
 import matplotlib.pyplot as plt
+
+from typing import Sequence
+
+# spell-checker: disable
+SPECIES_MAPPING = {
+    "Picea abies": "spruce",  # Norway Spruce
+    "Pinus sylvestris": "pine",  # Scots Pine
+    "Fagus sylvatica": "beech",  # Common Beech
+    "Quercus petraea": "oak",  # Sessile Oak
+    "Quercus robur": "oak",  # Pedunculate Oak
+}
+
+
+def perform_ablation(ablation: Ablation, features: Sequence[str]) -> Sequence[str]:
+    """
+    Perform ablation on the features based on the specified ablation type.
+
+    Parameters
+    ----------
+    - ablation (Ablation): The type of ablation to perform.
+    - features (list[str]): The list of features to ablate.
+
+    Returns
+    -------
+    The ablated list of features.
+    """
+
+    if ablation == "all":
+        return features
+    elif ablation == "tree-level-only":
+        return [
+            feature
+            for feature in features
+            if FEATURES_DESCRIPTION[feature]["level"] == "tree"
+        ]
+    elif ablation == "plot-level-only":
+        return [
+            feature
+            for feature in features
+            if FEATURES_DESCRIPTION[feature]["level"] == "plot"
+        ]
+    elif (match := re.match(r"(.*)-defoliation", ablation)) is not None:
+        prefix = match.group(1)
+
+        if prefix == "no":
+            return [feature for feature in features if "defoliation" not in feature]
+        else:
+            return [
+                feature
+                for feature in features
+                if "defoliation" not in feature or feature == f"defoliation_{prefix}"
+            ]
+    else:
+        raise ValueError(
+            f"Unknown ablation type: {ablation}. "
+            f"Expected one of: 'all', 'tree-level-only', 'plot-level-only', 'no-defoliation'."
+        )
 
 
 def load_data(species: Species) -> pl.DataFrame:
@@ -19,44 +84,18 @@ def load_data(species: Species) -> pl.DataFrame:
     -------
     Data for the given species.
     """
-    if species == "spruce":  # Norway Spruce
-        query = "specie == 'Picea abies'"
-    elif species == "pine":  # Scots Pine
-        query = "specie == 'Pinus sylvestris'"
-    elif species == "beech":  # Common Beech
-        query = "specie == 'Fagus sylvatica'"
-    elif species == "oak":  # Sessile & Pedunculate Oak
-        query = "(specie == 'Quercus petraea') | (specie == 'Quercus robur')"
-
-    data = pl.read_parquet(
-        os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
-    ).sql(f"SELECT * FROM self WHERE {query}")
-
-    if (
-        TARGET == "growth_rate_rel"
-        and len(
-            filenames := glob.glob(
-                os.path.join(
-                    DATA_PATH, "predictions", f"defoliation_mean-{species}-*.npy"
-                )
-            )
+    return (
+        pl.read_parquet(
+            # os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
+            os.path.join(DATA_PATH, "tidy", "cpf-level2_cleaned.parquet")
         )
-        > 0
-    ):
-        # Load predicted defoliation values, if available
-        data = data.with_columns(
-            pl.Series(
-                "defoliation_mean_pred",
-                # Average the predictions across folds
-                np.stack([np.load(fn) for fn in filenames], axis=1).mean(axis=1),
-            )
-        )
-
-    return data
+        .with_columns(species=pl.col("specie").cast(pl.Utf8).replace(SPECIES_MAPPING))
+        .filter(pl.col("species") == species)
+    )
 
 
 def prepare_data(
-    df: pl.DataFrame, plotting: bool = False
+    df: pl.DataFrame, ablation: Ablation = "all", plotting: bool = False
 ) -> tuple[pl.DataFrame, pl.Series]:
     """Prepare the data for training.
 
@@ -67,6 +106,8 @@ def prepare_data(
     ----------
     df
         Dataframe containing the data.
+    ablation
+        Ablation to apply to the data. If "all", no ablation is applied.
     plotting
         Whether to plot the fitted distribution and Q-Q plot.
 
@@ -85,9 +126,9 @@ def prepare_data(
         )
 
     # Select the features and the transformed target
-    X = df.select(FEATURES)
+    X = df.select(perform_ablation(ablation, list(FEATURES_DESCRIPTION.keys())))
 
-    X = cat_to_codes(X, CATEGORICAL_COLUMNS)
+    X = cat_to_codes(X, CATEGORICAL_COLUMNS).fill_nan(None)
     y = df[TARGET]
 
     # Apply a log-normal transformation to the target if it is growth rate

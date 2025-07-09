@@ -335,47 +335,22 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "mm",
     },
-    "defoliation_mean_pred": {
-        "description": "Predicted mean defoliation",
-        "level": "predicted",
-        "unit": "%",
-    },
-    "defoliation_mean_residual": {
-        "description": "Residual of the mean defoliation",
-        "level": "predicted",
-        "unit": "%",
-    },
 }
 
 # Configure the features and target variable
-# TARGET = "defoliation_mean"
 TARGET = "growth_rate_rel"
 
-# NOTE: the final feature set might be slightly different, as we may either drop or construct
-# additional features during the data processing step.
-if TARGET == "defoliation_mean":
-    FEATURES = [
-        feature
-        for feature, _ in FEATURES_DESCRIPTION.items()
-        if "defoliation" not in feature
-    ]
-elif TARGET == "growth_rate_rel":
-    FEATURES = [
-        feature
-        for feature, meta in FEATURES_DESCRIPTION.items()
-        if meta["level"] != "predicted" and "diameter" not in feature
-    ]
-elif TARGET == "growth_rate":
-    FEATURES = [
-        feature
-        for feature, meta in FEATURES_DESCRIPTION.items()
-        if meta["level"] != "predicted"
-    ]
-else:
-    raise ValueError(f"Unknown target variable: {TARGET}")
+# List ablations
+Ablation = Literal[
+    "all",
+    "tree-level-only",
+    "plot-level-only",
+    "no-defoliation",
+    "max-defoliation",
+    "min-defoliation",
+    "median-defoliation",
+]
 
-# Exclude defoliation features (optional)
-# FEATURES = [feature for feature in FEATURES if "defoliation" not in feature]
 
 # Subet of columns that are categorical
 CATEGORICAL_COLUMNS = ["country", "plot_orientation"]
