@@ -2,16 +2,133 @@ import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-
-from typing import cast
-
-from models import Estimator, ExperimentResults, Split
-
+from shap.plots import scatter
 import os
+
+from typing import cast, Any
+
+from models import EstimatorProtocol, ExperimentResults, Split
+
+from scipy.optimize import curve_fit
+
+
+def plot_dependence(
+    results: ExperimentResults,
+    feature: str,
+    fold: int = 0,
+    label: str | None = None,
+    show_no_effect: bool = True,
+    fit_curve: bool = False,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    ax: Axes | None = None,
+    **kwargs: Any,
+):
+    """Plot SHAP dependence plot for a given feature.
+
+    Parameters
+    ----------
+    results
+        Results object containing the SHAP values.
+    feature
+        Name of the feature for which to plot the SHAP values.
+    fold
+        Fold index to be used (by default, the first fold).
+    label
+        Label for the plot. If None, no label is set.
+    show_no_effect
+        Whether to show the line indicating no effect (default is True).
+    fit_curve
+        Whether to fit a curve to the SHAP values (default is False).
+    xlim
+        Tuple specifying the x-axis limits. If None, limits are set based on the data.
+    ylim
+        Tuple specifying the y-axis limits. If None, limits are set based on the data.
+    ax
+        Axes object to plot the SHAP values on. If None, a new figure is created.
+    **kwargs
+        Additional keyword arguments to pass to the scatter plot.
+
+    Returns
+    -------
+    """
+    # If no alpha is provided, set it to 0.6
+    kwargs.setdefault("alpha", 0.6)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 6))
+
+    if xlim is None:
+        xlim = (
+            np.nanmin(results.X[results.get_indices(fold, "all"), feature]),
+            np.nanmax(results.X[results.get_indices(fold, "all"), feature]),
+        )
+    if ylim is None:
+        ylim = (
+            np.nanmin(results.shap_values[fold][:, feature].values),  # type: ignore
+            np.nanmax(results.shap_values[fold][:, feature].values),  # type: ignore
+        )
+
+    # Enlarge slightly the limits for better visibility
+    xlim = (xlim[0] - 0.05 * (xlim[1] - xlim[0]), xlim[1] + 0.05 * (xlim[1] - xlim[0]))
+    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))
+
+    # Get indices for which the feature values are not NaN
+    valid_indices = ~np.isnan(results.shap_values[fold][:, feature].data)  # type: ignore
+    scatter(
+        results.shap_values[fold][valid_indices, feature], ax=ax, show=False, **kwargs
+    )
+
+    if label is not None:
+        ax.collections[-1].set_label(label)
+
+    # Draw the line that indicates no effect
+    if show_no_effect:
+        ax.axhline(0, color="grey", linestyle="--")
+        ax.text(xlim[1], ylim[1] / 20, "No effect", color="grey", ha="right")
+
+    if fit_curve:
+        # Fit a power law with vertical offset
+        def func(x, a, b, c):
+            return a * x**b + c
+
+        # Get the SHAP values for the selected feature
+        shapley_values = cast(np.ndarray, results.shap_values[fold][:, feature].values)  # type: ignore
+        feature_values = results.X[results.get_indices(fold, "all"), feature].to_numpy()
+
+        # Remove NaN values from feature_values and shapley_values
+        valid_mask = ~np.isnan(feature_values)
+        feature_values = feature_values[valid_mask]
+        shapley_values = shapley_values[valid_mask]
+
+        # Order dataset by feature values
+        order_idx = np.argsort(feature_values)
+        feature_values = feature_values[order_idx]
+        shapley_values = shapley_values[order_idx]
+
+        # Get the SHAP values for the selected feature
+        popt, _ = curve_fit(func, feature_values, shapley_values)
+
+        # Plot the curve
+        x = np.linspace(feature_values.min(), feature_values.max(), 100)
+        ax.plot(
+            x,
+            func(x, *popt),
+            color="red",
+            label=f"y = {popt[0]:.2e} x^{popt[1]:.2f} + {popt[2]:.2f}",
+        )
+
+    ax.set_title(results.species.capitalize())
+    ax.set_xlabel(feature)
+    ax.set_ylabel("SHAP value")
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+
+    return ax
 
 
 def plot_ceteris_paribus_profile(
-    estimator: Estimator,
+    estimator: EstimatorProtocol,
     X: pl.DataFrame,
     instance_id: int,
     feature: str,
@@ -82,7 +199,7 @@ def plot_ceteris_paribus_profile(
     return feature_range, y_pred
 
 
-def plot_interaction_matrix(
+def compute_interaction_matrix(
     results: ExperimentResults,
     *,
     num_samples: int | None = 2000,
@@ -92,9 +209,9 @@ def plot_interaction_matrix(
     vmax: float | None = None,
     ax: Axes | None = None,
     use_caching: bool = True,
-    disable_plotting: bool = False,
+    plotting: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Plot SHAP interaction matrix for the given fold.
+    """Compute SHAP interaction matrix for the given fold and plot it optionally.
 
     Parameters
     ----------
@@ -112,24 +229,25 @@ def plot_interaction_matrix(
         Axes object to plot the matrix on. If None, a new figure is created.
     use_caching
         Whether to use caching for the interaction values.
-    disable_plotting
-        Whether to plot the matrix (set to only get the results).
+    plotting
+        Plot the interaction matrix if True (or if `ax` is not None).
 
     Returns
     -------
     A tuple (interactions, indices) containing the interaction values and the indices of the
     features.
     """
+    import cmocean
 
     def _get_fold_data(fold: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        fname = os.path.join(
+            "cache", f"interactions-{results.species}-{results.ablation}-{fold}.parquet"
+        )
+
         # Load from cache
         if use_caching:
             try:
-                cached = pl.read_parquet(
-                    os.path.join(
-                        "cache", f"interactions-{results.species}-{fold}.parquet"
-                    )
-                )
+                cached = pl.read_parquet(fname)
 
                 return (
                     cached["interactions"].to_numpy(),
@@ -157,9 +275,7 @@ def plot_interaction_matrix(
                     "shap_values": shap_values,
                     "indices": indices,
                 }
-            ).write_parquet(
-                os.path.join("cache", f"interactions-{results.species}-{fold}.parquet")
-            )
+            ).write_parquet(fname)
 
         return interactions, shap_values, indices
 
@@ -171,7 +287,7 @@ def plot_interaction_matrix(
     # might have been computed for different conditions.
     assert np.all(np.abs(shap_values - np.sum(interactions, axis=2)) < 1e-9)
 
-    if not disable_plotting:
+    if plotting or ax is not None:
         # Get the top-n features with the highest interaction values
         if isinstance(top_n, int):
             top_n_idx = np.argsort(np.absolute(shap_values).mean(axis=0))[::-1][:top_n]
@@ -191,7 +307,7 @@ def plot_interaction_matrix(
 
         pcm = ax.imshow(
             np.absolute(interacts_no_diag).mean(axis=0),
-            cmap="coolwarm",
+            cmap=cmocean.cm.thermal,  # type: ignore[attr-defined]
             vmin=0.0,
             vmax=vmax,
         )
