@@ -10,27 +10,38 @@ from config import (
 import numpy as np
 import polars as pl
 import os
-import glob
+import re
+
 import matplotlib.pyplot as plt
 
 from typing import Sequence
+
+# spell-checker: disable
+SPECIES_MAPPING = {
+    "Picea abies": "spruce",  # Norway Spruce
+    "Pinus sylvestris": "pine",  # Scots Pine
+    "Fagus sylvatica": "beech",  # Common Beech
+    "Quercus petraea": "oak",  # Sessile Oak
+    "Quercus robur": "oak",  # Pedunculate Oak
+}
 
 
 def perform_ablation(ablation: Ablation, features: Sequence[str]) -> Sequence[str]:
     """
     Perform ablation on the features based on the specified ablation type.
 
-    Parameters:
+    Parameters
+    ----------
     - ablation (Ablation): The type of ablation to perform.
     - features (list[str]): The list of features to ablate.
 
-    Returns:
+    Returns
+    -------
     The ablated list of features.
     """
+
     if ablation == "all":
         return features
-    elif ablation == "no-defoliation":
-        return [feature for feature in features if "defoliation" not in feature]
     elif ablation == "tree-level-only":
         return [
             feature
@@ -43,6 +54,17 @@ def perform_ablation(ablation: Ablation, features: Sequence[str]) -> Sequence[st
             for feature in features
             if FEATURES_DESCRIPTION[feature]["level"] == "plot"
         ]
+    elif (match := re.match(r"(.*)-defoliation", ablation)) is not None:
+        prefix = match.group(1)
+
+        if prefix == "no":
+            return [feature for feature in features if "defoliation" not in feature]
+        else:
+            return [
+                feature
+                for feature in features
+                if "defoliation" not in feature or feature == f"defoliation_{prefix}"
+            ]
     else:
         raise ValueError(
             f"Unknown ablation type: {ablation}. "
@@ -62,41 +84,14 @@ def load_data(species: Species) -> pl.DataFrame:
     -------
     Data for the given species.
     """
-    if species == "spruce":  # Norway Spruce
-        query = "specie == 'Picea abies'"
-    elif species == "pine":  # Scots Pine
-        query = "specie == 'Pinus sylvestris'"
-    elif species == "beech":  # Common Beech
-        query = "specie == 'Fagus sylvatica'"
-    elif species == "oak":  # Sessile & Pedunculate Oak
-        query = "(specie == 'Quercus petraea') | (specie == 'Quercus robur')"
-
-    data = pl.read_parquet(
-        # os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
-        os.path.join(DATA_PATH, "tidy", "cpf-level2_cleaned.parquet")
-    ).sql(f"SELECT * FROM self WHERE {query}")
-
-    if (
-        TARGET == "growth_rate_rel"
-        and len(
-            filenames := glob.glob(
-                os.path.join(
-                    DATA_PATH, "predictions", f"defoliation_mean-{species}-*.npy"
-                )
-            )
+    return (
+        pl.read_parquet(
+            # os.path.join(DATA_PATH, "tidy", "cpf-level2_growth-periods_with-cc.parquet")
+            os.path.join(DATA_PATH, "tidy", "cpf-level2_cleaned.parquet")
         )
-        > 0
-    ):
-        # Load predicted defoliation values, if available
-        data = data.with_columns(
-            pl.Series(
-                "defoliation_mean_pred",
-                # Average the predictions across folds
-                np.stack([np.load(fn) for fn in filenames], axis=1).mean(axis=1),
-            )
-        )
-
-    return data
+        .with_columns(species=pl.col("specie").cast(pl.Utf8).replace(SPECIES_MAPPING))
+        .filter(pl.col("species") == species)
+    )
 
 
 def prepare_data(

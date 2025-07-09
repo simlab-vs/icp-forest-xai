@@ -338,10 +338,18 @@ FEATURES_DESCRIPTION = {
 }
 
 # Configure the features and target variable
-# TARGET = "defoliation_mean"
 TARGET = "growth_rate_rel"
 
-Ablation = Literal["all", "tree-level-only", "plot-level-only", "no-defoliation"]
+# List ablations
+Ablation = Literal[
+    "all",
+    "tree-level-only",
+    "plot-level-only",
+    "no-defoliation",
+    "max-defoliation",
+    "min-defoliation",
+    "median-defoliation",
+]
 
 
 # Subet of columns that are categorical

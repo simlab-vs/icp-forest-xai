@@ -20,6 +20,7 @@ import sys
 import contextlib
 import logging
 import os
+
 import numpy as np
 import polars as pl
 
@@ -417,6 +418,8 @@ class ExperimentResults:
     ----------
     species
         Species for which the experiment was run.
+    ablation
+        Ablation study performed on the model.
     X
         Dataframe containing the features.
     metadata
@@ -438,6 +441,7 @@ class ExperimentResults:
     """
 
     species: Species
+    ablation: Ablation
 
     X: pl.DataFrame
     metadata: pl.DataFrame
@@ -615,41 +619,6 @@ def train_and_explain(
     else:
         groups = None
 
-    # Create estimator
-    if model_type == "lgbm":
-        sklearn.set_config(enable_metadata_routing=False)
-
-        model = LGBMEstimator(
-            species=species,
-            group_by=group_by,
-            cv=cv,
-            n_jobs=n_jobs,
-        )
-    elif model_type == "lasso":
-        # Enable metadata routing for LassoCV to handle group information
-        sklearn.set_config(enable_metadata_routing=True)
-
-        model = LassoEstimator(
-            species=species,
-            group_by=group_by,
-            cv=cv,
-            n_jobs=n_jobs,
-            max_iter=25000,
-        )
-
-        # Input NaNs are not allowed in LassoCV, so we need to impute them
-        X = X.fill_null(0)
-
-        # Standardize the features
-        X = pl.DataFrame(
-            sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
-            schema=X.schema,
-        )
-    else:
-        raise ValueError(
-            f"Unknown estimator: {model_type}. Supported estimators are 'lgbm' and 'lasso'."
-        )
-
     # Cross-validation loop
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
@@ -658,6 +627,41 @@ def train_and_explain(
     for fold, (train_idx, test_idx) in enumerate(
         splitter.split(to_numpy(X), y, groups=to_numpy(groups))
     ):
+        # Create estimator
+        if model_type == "lgbm":
+            sklearn.set_config(enable_metadata_routing=False)
+
+            estimator = LGBMEstimator(
+                species=species,
+                group_by=group_by,
+                cv=cv,
+                n_jobs=n_jobs,
+            )
+        elif model_type == "lasso":
+            # Enable metadata routing for LassoCV to handle group information
+            sklearn.set_config(enable_metadata_routing=True)
+
+            estimator = LassoEstimator(
+                species=species,
+                group_by=group_by,
+                cv=cv,
+                n_jobs=n_jobs,
+                max_iter=25000,
+            )
+
+            # Input NaNs are not allowed in LassoCV, so we need to impute them
+            X = X.fill_null(0)
+
+            # Standardize the features
+            X = pl.DataFrame(
+                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
+                schema=X.schema,
+            )
+        else:
+            raise ValueError(
+                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm' and 'lasso'."
+            )
+
         print(f"Fold {fold + 1}/{cv}")
 
         # Split data into training and test sets
@@ -665,7 +669,7 @@ def train_and_explain(
         y_train, y_test = y[train_idx], y[test_idx]
 
         # Fit the model
-        model.fit(
+        estimator.fit(
             X_train,
             y_train,
             groups=to_numpy(groups[train_idx]) if groups is not None else None,
@@ -673,13 +677,13 @@ def train_and_explain(
         )
 
         # Evaluate the model
-        r2_train = model.score(X_train, y_train)
-        r2_test = model.score(X_test, y_test)
+        r2_train = estimator.score(X_train, y_train)
+        r2_test = estimator.score(X_test, y_test)
 
         # Update cross-validation results
         results.test_r2.append(r2_test)
         results.train_r2.append(r2_train)
-        results.estimator.append(model)
+        results.estimator.append(estimator)
         results.indices["train"].append(pl.Series("train_idx", train_idx))
         results.indices["test"].append(pl.Series("test_idx", test_idx))
 
@@ -729,6 +733,7 @@ def train_and_explain(
 
     return ExperimentResults(
         species=species,
+        ablation=ablation,
         X=X,
         metadata=df.select(pl.selectors.exclude(*X.columns)),
         y_true=y,
