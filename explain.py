@@ -2,28 +2,29 @@ import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from shap.plots import scatter
+from matplotlib.figure import Figure
+
+import seaborn as sns
 import os
 
 from typing import cast, Any
 
 from models import EstimatorProtocol, ExperimentResults, Split
 
-from scipy.optimize import curve_fit
-
 
 def plot_dependence(
     results: ExperimentResults,
     feature: str,
-    fold: int = 0,
+    fold: int | None = None,
     label: str | None = None,
+    show_interaction: bool = False,
     show_no_effect: bool = True,
     fit_curve: bool = False,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     ax: Axes | None = None,
     **kwargs: Any,
-):
+) -> Axes:
     """Plot SHAP dependence plot for a given feature.
 
     Parameters
@@ -33,7 +34,7 @@ def plot_dependence(
     feature
         Name of the feature for which to plot the SHAP values.
     fold
-        Fold index to be used (by default, the first fold).
+        Fold index to be used (by default, all folds).
     label
         Label for the plot. If None, no label is set.
     show_no_effect
@@ -51,22 +52,42 @@ def plot_dependence(
 
     Returns
     -------
+    The axes object with the SHAP dependence plot.
     """
     # If no alpha is provided, set it to 0.6
-    kwargs.setdefault("alpha", 0.6)
+    kwargs.setdefault("alpha", 0.2)
+
+    if fold is None:
+        indices = np.arange(results.X.shape[0])
+        shap_values = np.concatenate(
+            [
+                results.shap_values[fold][:, feature].values  # type: ignore
+                for fold in range(results.num_folds)
+            ]
+        )
+        feature_values = np.concatenate(
+            [
+                results.shap_values[fold][:, feature].data  # type: ignore
+                for fold in range(results.num_folds)
+            ]
+        )
+    else:
+        indices = results.get_indices(fold, "all")
+        shap_values = cast(np.ndarray, results.shap_values[fold][:, feature].values)  # type: ignore
+        feature_values = cast(np.ndarray, results.shap_values[fold][:, feature].data)  # type: ignore
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
     if xlim is None:
         xlim = (
-            np.nanmin(results.X[results.get_indices(fold, "all"), feature]),
-            np.nanmax(results.X[results.get_indices(fold, "all"), feature]),
+            np.nanmin(results.X[indices, feature]),
+            np.nanmax(results.X[indices, feature]),
         )
     if ylim is None:
         ylim = (
-            np.nanmin(results.shap_values[fold][:, feature].values),  # type: ignore
-            np.nanmax(results.shap_values[fold][:, feature].values),  # type: ignore
+            np.nanmin(shap_values),
+            np.nanmax(shap_values),
         )
 
     # Enlarge slightly the limits for better visibility
@@ -74,9 +95,58 @@ def plot_dependence(
     ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))
 
     # Get indices for which the feature values are not NaN
-    valid_indices = ~np.isnan(results.shap_values[fold][:, feature].data)  # type: ignore
-    scatter(
-        results.shap_values[fold][valid_indices, feature], ax=ax, show=False, **kwargs
+    valid_indices = ~np.isnan(feature_values)  # type: ignore
+
+    xwidth = xlim[1] - xlim[0]
+    ywidth = ylim[1] - ylim[0]
+    wiggle = 0.005
+
+    xwiggle = np.random.uniform(
+        -wiggle * xwidth, wiggle * xwidth, size=np.sum(valid_indices)
+    )
+    ywiggle = np.random.uniform(
+        -wiggle * ywidth, wiggle * ywidth, size=np.sum(valid_indices)
+    )
+
+    sns.scatterplot(
+        x=feature_values[valid_indices] + xwiggle,
+        y=shap_values[valid_indices] + ywiggle,
+        ax=ax,
+        edgecolor=None,
+        legend=False,
+        size=6,
+        **kwargs,
+    )
+
+    # Overlaid inset axes for histogram with the same x-axis limits
+    ax2 = ax.inset_axes(
+        bounds=(0, 0, 1.0, 0.2),
+        zorder=0,
+        sharex=ax,
+        frame_on=False,
+    )
+
+    # Remove xticks/yticks from the inset axes
+    ax2.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    ax2.tick_params(
+        axis="y",
+        which="both",
+        left=False,
+        right=False,
+        labelleft=False,
+        labelright=False,
+    )
+
+    # Overlaid histogram of point density
+    sns.histplot(
+        x=feature_values[valid_indices],
+        legend=False,
+        ax=ax2,
+        bins=50,
+        stat="density",
+        color="grey",
+        alpha=0.3,
+        edgecolor=None,
     )
 
     if label is not None:
@@ -85,44 +155,27 @@ def plot_dependence(
     # Draw the line that indicates no effect
     if show_no_effect:
         ax.axhline(0, color="grey", linestyle="--")
-        ax.text(xlim[1], ylim[1] / 20, "No effect", color="grey", ha="right")
-
-    if fit_curve:
-        # Fit a power law with vertical offset
-        def func(x, a, b, c):
-            return a * x**b + c
-
-        # Get the SHAP values for the selected feature
-        shapley_values = cast(np.ndarray, results.shap_values[fold][:, feature].values)  # type: ignore
-        feature_values = results.X[results.get_indices(fold, "all"), feature].to_numpy()
-
-        # Remove NaN values from feature_values and shapley_values
-        valid_mask = ~np.isnan(feature_values)
-        feature_values = feature_values[valid_mask]
-        shapley_values = shapley_values[valid_mask]
-
-        # Order dataset by feature values
-        order_idx = np.argsort(feature_values)
-        feature_values = feature_values[order_idx]
-        shapley_values = shapley_values[order_idx]
-
-        # Get the SHAP values for the selected feature
-        popt, _ = curve_fit(func, feature_values, shapley_values)
-
-        # Plot the curve
-        x = np.linspace(feature_values.min(), feature_values.max(), 100)
-        ax.plot(
-            x,
-            func(x, *popt),
-            color="red",
-            label=f"y = {popt[0]:.2e} x^{popt[1]:.2f} + {popt[2]:.2f}",
+        ax.text(
+            xlim[1] - 0.02 * xwidth,
+            0.02 * ywidth,
+            "No effect",
+            color="grey",
+            ha="right",
         )
+
+    # Set vertical grid lines for better readability
+    ax.xaxis.grid(True, linestyle="--", alpha=0.5)
 
     ax.set_title(results.species.capitalize())
     ax.set_xlabel(feature)
     ax.set_ylabel("SHAP value")
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
+
+    fig = ax.get_figure()
+
+    if fig is not None and isinstance(fig, Figure):
+        fig.tight_layout()
 
     return ax
 
