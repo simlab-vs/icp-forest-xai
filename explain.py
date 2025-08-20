@@ -11,6 +11,131 @@ from models import EstimatorProtocol, ExperimentResults, Split
 
 from scipy.optimize import curve_fit
 
+import shap
+
+def plot_dependence_inc(
+    results: ExperimentResults,
+    feature: str,
+    fold: int | None = None,  # None means use full data
+    label: str | None = None,
+    show_no_effect: bool = True,
+    fit_curve: bool = False,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    ax: Axes | None = None,
+    **kwargs: Any,
+):
+    """Plot SHAP dependence plot for a given feature .
+
+    Parameters
+    ----------
+    results
+        Results object containing the SHAP values.
+    feature
+        Name of the feature for which to plot the SHAP values.
+    fold
+        Fold index to be used (by default, None and uses full data ).
+    label
+        Label for the plot. If None, no label is set.
+    show_no_effect
+        Whether to show the line indicating no effect (default is True).
+    fit_curve
+        Whether to fit a curve to the SHAP values (default is False).
+    xlim
+        Tuple specifying the x-axis limits. If None, limits are set based on the data.
+    ylim
+        Tuple specifying the y-axis limits. If None, limits are set based on the data.
+    ax
+        Axes object to plot the SHAP values on. If None, a new figure is created.
+    **kwargs
+        Additional keyword arguments to pass to the scatter plot.
+
+    Returns
+    -------
+    """
+    # If no alpha is provided, set it to 0.6
+    kwargs.setdefault("alpha", 0.6)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 6))
+
+    if fold is None:
+        raw_shap = []
+        raw_X = []
+        for i in range(len(results.shap_values)):
+            indices = results.get_indices(i, "all")
+            fold_shap = results.shap_values[i][:, feature].values
+            fold_X = results.X[indices, feature].to_numpy()
+            raw_shap.append(fold_shap)
+            raw_X.append(fold_X)
+        shapley_values = np.concatenate(raw_shap)
+        feature_values = np.concatenate(raw_X)
+    else:
+        indices = results.get_indices(fold, "all")
+        shapley_values = results.shap_values[fold][:, feature].values
+        feature_values = results.X[indices, feature].to_numpy()
+
+    # Filter out NaNs before creating Explanation object
+    valid_mask = ~np.isnan(shapley_values) & ~np.isnan(feature_values)
+    feature_values = feature_values[valid_mask]
+    shapley_values = shapley_values[valid_mask]
+
+    # Create Explanation object
+    explanation = shap.Explanation(
+        values=shapley_values, data=feature_values, feature_names=feature
+    )
+
+    # Axis limits
+    if xlim is None:
+        xlim = (np.nanmin(feature_values), np.nanmax(feature_values))
+    if ylim is None:
+        ylim = (np.nanmin(shapley_values), np.nanmax(shapley_values))
+
+    # Slightly expand limits
+    xlim = (xlim[0] - 0.05 * (xlim[1] - xlim[0]), xlim[1] + 0.05 * (xlim[1] - xlim[0]))
+    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))
+
+    # Plot
+    scatter(explanation, ax=ax, show=False, **kwargs)
+
+    if label is not None:
+        ax.collections[-1].set_label(label)
+
+    # Draw the line that indicates no effect
+    if show_no_effect:
+        ax.axhline(0, color="grey", linestyle="--")
+        ax.text(xlim[1], ylim[1] / 20, "No effect", color="grey", ha="right")
+
+    if fit_curve:
+        # Fit a power law with vertical offset
+        def func(x, a, b, c):
+            return a * x**b + c
+
+        # Order dataset by feature values
+        order_idx = np.argsort(feature_values)
+        feature_values = feature_values[order_idx]
+        shapley_values = shapley_values[order_idx]
+
+        # Get the SHAP values for the selected feature
+        popt, _ = curve_fit(func, feature_values, shapley_values)
+
+        # Plot the curve
+        x = np.linspace(feature_values.min(), feature_values.max(), 100)
+        ax.plot(
+            x,
+            func(x, *popt),
+            color="red",
+            label=f"y = {popt[0]:.2e} x^{popt[1]:.2f} + {popt[2]:.2f}",
+        )
+
+    ax.set_title(results.species.capitalize())
+    ax.set_xlabel(feature)
+    ax.set_ylabel("SHAP value")
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+
+    return ax
+
 
 def plot_dependence(
     results: ExperimentResults,
