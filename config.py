@@ -61,6 +61,11 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "m",
     },
+    "total_precipitation": {
+        "description": "Total precipitation",
+        "level": "plot",
+        "unit": "l/m²",
+    },
     "dep_ph": {"description": "Deposition pH", "level": "plot", "unit": None},
     "dep_cond": {
         "description": "Deposition conductivity",
@@ -87,18 +92,29 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "mg/l",
     },
-    "dep_n_nh4": {
-        "description": "Deposition ammonium (NH4)",
+    "dep_n_tot": {
+        "description": "Deposition total nitrogen (N)",
         "level": "plot",
         "unit": "mg/l",
     },
+    # "dep_n_nh4": {
+    #     "description": "Deposition ammonium (NH4)",
+    #     "level": "plot",
+    #     "unit": "mg/l",
+    # },
+    # "dep_n_no3": {
+    #     "description": "Deposition nitrate (NO3)",
+    #     "level": "plot",
+    #     "unit": "mg/l",
+    # },
+    # "dep_n_no2": {
+    #     "description": "Deposition nitrite (NO2)",
+    #     "level": "plot",
+    #     "unit": "mg/l",
+    # },
+    # "dep_n_org": {"description": "Deposition organic nitrogen (N)", "level": "plot", "unit": "mg/l"},
     "dep_cl": {
         "description": "Deposition chloride (Cl)",
-        "level": "plot",
-        "unit": "mg/l",
-    },
-    "dep_n_no3": {
-        "description": "Deposition nitrate (NO3)",
         "level": "plot",
         "unit": "mg/l",
     },
@@ -111,11 +127,6 @@ FEATURES_DESCRIPTION = {
         "description": "Deposition alkalinity",
         "level": "plot",
         "unit": "µEq/l",
-    },
-    "dep_n_tot": {
-        "description": "Deposition total nitrogen (N)",
-        "level": "plot",
-        "unit": "mg/l",
     },
     "dep_doc": {
         "description": "Deposition dissolved organic carbon (DOC)",
@@ -156,6 +167,8 @@ FEATURES_DESCRIPTION = {
         "unit": "µg/l",
     },
     # "dep_mo": {"description": "Deposition molybdenum (Mo)", "level": "plot", "unit": "µg/l"},
+    # "dep_hco3": {"description": "Deposition bicarbonate (HCO3)", "level": "plot", "unit": "mg/l"},
+    # "dep_don": {"description": "Deposition dissolved organic nitrogen (DON)", "level": "plot", "unit": "mg/l"},
     "dep_ni": {
         "description": "Deposition nickel (Ni)",
         "level": "plot",
@@ -176,7 +189,6 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "mg/l",
     },
-    # "dep_n_org": {"description": "Deposition organic nitrogen (N)", "level": "plot", "unit": "mg/l"},
     "dep_p_tot": {
         "description": "Deposition total phosphorus (P)",
         "level": "plot",
@@ -187,13 +199,6 @@ FEATURES_DESCRIPTION = {
         "level": "plot",
         "unit": "µg/l",
     },
-    "dep_n_no2": {
-        "description": "Deposition nitrite (NO2)",
-        "level": "plot",
-        "unit": "mg/l",
-    },
-    # "dep_hco3": {"description": "Deposition bicarbonate (HCO3)", "level": "plot", "unit": "mg/l"},
-    # "dep_don": {"description": "Deposition dissolved organic nitrogen (DON)", "level": "plot", "unit": "mg/l"},
     "ss_ph": {"description": "Soil solution pH", "level": "plot", "unit": None},
     "ss_cond": {
         "description": "Soil solution conductivity",

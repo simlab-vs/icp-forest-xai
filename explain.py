@@ -17,9 +17,7 @@ def plot_dependence(
     feature: str,
     fold: int | None = None,
     label: str | None = None,
-    show_interaction: bool = False,
     show_no_effect: bool = True,
-    fit_curve: bool = False,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     ax: Axes | None = None,
@@ -39,8 +37,6 @@ def plot_dependence(
         Label for the plot. If None, no label is set.
     show_no_effect
         Whether to show the line indicating no effect (default is True).
-    fit_curve
-        Whether to fit a curve to the SHAP values (default is False).
     xlim
         Tuple specifying the x-axis limits. If None, limits are set based on the data.
     ylim
@@ -55,7 +51,7 @@ def plot_dependence(
     The axes object with the SHAP dependence plot.
     """
     # If no alpha is provided, set it to 0.6
-    kwargs.setdefault("alpha", 0.2)
+    kwargs.setdefault("alpha", 0.6)
 
     if fold is None:
         indices = np.arange(results.X.shape[0])

@@ -139,10 +139,8 @@ def prepare_data(
     shape, loc, scale = lognorm.fit(y_plus_one)
 
     # Perform the Kolmogorov-Smirnov test
-    ks_stat, p_value = kstest(y_plus_one, "lognorm", args=(shape, loc, scale))
-
-    print(f"KS Statistic: {ks_stat}")
-    print(f"P-value: {p_value:0.2}")
+    _, p_value = kstest(y_plus_one, "lognorm", args=(shape, loc, scale))
+    print(f"P-value: {p_value:0.2f}")
 
     if plotting:
         # Plot the data and the fitted distribution for visualization
