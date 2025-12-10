@@ -7,9 +7,16 @@ from matplotlib.figure import Figure
 import seaborn as sns
 import os
 
-from typing import cast, Any
+from enum import Enum
+from typing import Callable, cast, Any
 
 from models import EstimatorProtocol, ExperimentResults, Split
+
+
+class PlotType(Enum):
+    SCATTER = "scatter"
+    LINE = "line"
+    DENSITY = "density"
 
 
 def plot_dependence(
@@ -18,9 +25,14 @@ def plot_dependence(
     fold: int | None = None,
     label: str | None = None,
     show_no_effect: bool = True,
+    fit_func: Callable | None = None,
+    fit_p0: tuple[float, float, float] | None = None,
+    fit_formula: str | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     ax: Axes | None = None,
+    color: str = "#1f77b4",
+    plot_type: PlotType = PlotType.SCATTER,
     **kwargs: Any,
 ) -> Axes:
     """Plot SHAP dependence plot for a given feature.
@@ -37,12 +49,22 @@ def plot_dependence(
         Label for the plot. If None, no label is set.
     show_no_effect
         Whether to show the line indicating no effect (default is True).
+    fit_func
+        Function to fit a curve to the data (default is None).
+    fit_p0
+        Initial parameters for the fit function (default is None).
+    fit_formula
+        The formula to display the fitted curve (default is None).
     xlim
         Tuple specifying the x-axis limits. If None, limits are set based on the data.
     ylim
         Tuple specifying the y-axis limits. If None, limits are set based on the data.
     ax
         Axes object to plot the SHAP values on. If None, a new figure is created.
+    color
+        Color of the scatter points.
+    plot_type
+        Type of plot to create (scatter or line).
     **kwargs
         Additional keyword arguments to pass to the scatter plot.
 
@@ -55,98 +77,148 @@ def plot_dependence(
 
     if fold is None:
         indices = np.arange(results.X.shape[0])
-        shap_values = np.concatenate(
-            [
-                results.shap_values[fold][:, feature].values  # type: ignore
-                for fold in range(results.num_folds)
-            ]
-        )
+        shap_values = (
+            np.concatenate(
+                [
+                    results.shap_values[fold][:, feature].values  # type: ignore
+                    for fold in range(results.num_folds)
+                ],
+                dtype=np.float64,
+            )
+        ) * 100
         feature_values = np.concatenate(
             [
                 results.shap_values[fold][:, feature].data  # type: ignore
                 for fold in range(results.num_folds)
-            ]
+            ],
+            dtype=np.float64,
         )
     else:
+        shap_struct = results.shap_values[fold][:, feature]
+        assert shap_struct is not None, (
+            f"Feature '{feature}' not found in SHAP values for fold {fold}"
+        )
+
         indices = results.get_indices(fold, "all")
-        shap_values = cast(np.ndarray, results.shap_values[fold][:, feature].values)  # type: ignore
-        feature_values = cast(np.ndarray, results.shap_values[fold][:, feature].data)  # type: ignore
+
+        shap_values = (cast(np.ndarray, shap_struct.values).astype(np.float64)) * 100  # type: ignore
+        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)  # type: ignore
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
+    # Enlarge slightly the limits for better visibility
     if xlim is None:
         xlim = (
             np.nanmin(results.X[indices, feature]),
             np.nanmax(results.X[indices, feature]),
         )
+
     if ylim is None:
         ylim = (
             np.nanmin(shap_values),
             np.nanmax(shap_values),
-        )
+        )  # type: ignore
 
-    # Enlarge slightly the limits for better visibility
     xlim = (xlim[0] - 0.05 * (xlim[1] - xlim[0]), xlim[1] + 0.05 * (xlim[1] - xlim[0]))
-    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))
+    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))  # type: ignore
 
     # Get indices for which the feature values are not NaN
-    valid_indices = ~np.isnan(feature_values)  # type: ignore
-
+    valid_indices = ~np.isnan(feature_values)
     xwidth = xlim[1] - xlim[0]
     ywidth = ylim[1] - ylim[0]
-    wiggle = 0.005
 
-    xwiggle = np.random.uniform(
-        -wiggle * xwidth, wiggle * xwidth, size=np.sum(valid_indices)
-    )
-    ywiggle = np.random.uniform(
-        -wiggle * ywidth, wiggle * ywidth, size=np.sum(valid_indices)
-    )
+    if plot_type == PlotType.LINE:
+        sns.lineplot(
+            x=feature_values[valid_indices],
+            y=shap_values[valid_indices],
+            ax=ax,
+            color=color,
+            label=label,
+            errorbar=("pi", 95),
+            **kwargs,
+        )
+    elif plot_type == PlotType.SCATTER:
+        wiggle = 0.005
+        xwiggle = np.random.uniform(
+            -wiggle * xwidth, wiggle * xwidth, size=np.sum(valid_indices)
+        )
+        ywiggle = np.random.uniform(
+            -wiggle * ywidth, wiggle * ywidth, size=np.sum(valid_indices)
+        )
+        sns.scatterplot(
+            x=feature_values[valid_indices] + xwiggle,
+            y=shap_values[valid_indices] + ywiggle,
+            ax=ax,
+            color=color,
+            edgecolor=None,
+            legend=False,
+            size=6,
+            label="_nolegend_",
+            **kwargs,
+        )
 
-    sns.scatterplot(
-        x=feature_values[valid_indices] + xwiggle,
-        y=shap_values[valid_indices] + ywiggle,
-        ax=ax,
-        edgecolor=None,
-        legend=False,
-        size=6,
-        **kwargs,
-    )
+        if fit_func is not None:
+            # Fit a power-law curve to the data
+            from scipy.optimize import curve_fit
 
-    # Overlaid inset axes for histogram with the same x-axis limits
-    ax2 = ax.inset_axes(
-        bounds=(0, 0, 1.0, 0.2),
-        zorder=0,
-        sharex=ax,
-        frame_on=False,
-    )
+            popt, _ = curve_fit(
+                fit_func,
+                feature_values[valid_indices],
+                shap_values[valid_indices],
+                p0=(1.0, 1.0, 0.0) if fit_p0 is None else fit_p0,
+            )
 
-    # Remove xticks/yticks from the inset axes
-    ax2.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
-    ax2.tick_params(
-        axis="y",
-        which="both",
-        left=False,
-        right=False,
-        labelleft=False,
-        labelright=False,
-    )
+            x_fit = np.linspace(xlim[0], xlim[1], 100)
+            y_fit = fit_func(x_fit, *popt)
 
-    # Overlaid histogram of point density
-    sns.histplot(
-        x=feature_values[valid_indices],
-        legend=False,
-        ax=ax2,
-        bins=50,
-        stat="density",
-        color="grey",
-        alpha=0.3,
-        edgecolor=None,
-    )
+            if fit_formula is not None:
+                label = f"${fit_formula.format(*popt)}$"
+            else:
+                label = "Fitted curve"
 
-    if label is not None:
-        ax.collections[-1].set_label(label)
+            ax.plot(x_fit, y_fit, color="k", linestyle="--", linewidth=2, label=label)
+
+            if label is not None:
+                ax.legend([label])
+    elif plot_type == PlotType.DENSITY:
+        # Overlaid inset axes for histogram with the same x-axis limits
+        ax2 = ax.inset_axes(
+            bounds=(0, 0, 1.0, 0.2),
+            zorder=0,
+            sharex=ax,
+            frame_on=False,
+        )
+
+        # Remove xticks/yticks from the inset axes
+        ax2.tick_params(
+            axis="x", which="both", bottom=False, top=False, labelbottom=False
+        )
+        ax2.tick_params(
+            axis="y",
+            which="both",
+            left=False,
+            right=False,
+            labelleft=False,
+            labelright=False,
+        )
+
+        # Overlaid histogram of point density
+        sns.histplot(
+            x=feature_values[valid_indices],
+            legend=False,
+            ax=ax2,
+            bins=50,
+            stat="density",
+            color="grey",
+            alpha=0.3,
+            edgecolor=None,
+        )
+
+        if label is not None:
+            ax.collections[-1].set_label(label)
+    else:
+        raise ValueError(f"Unknown plot type: {plot_type}")
 
     # Draw the line that indicates no effect
     if show_no_effect:
@@ -164,7 +236,7 @@ def plot_dependence(
 
     ax.set_title(results.species.capitalize())
     ax.set_xlabel(feature)
-    ax.set_ylabel("SHAP value")
+    ax.set_ylabel("SHAP value [%]")
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 

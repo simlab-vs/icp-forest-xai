@@ -4,7 +4,7 @@ from config import (
     TARGET,
     CATEGORICAL_COLUMNS,
     Ablation,
-    FEATURES_DESCRIPTION,
+    FEATURES_METADATA,
 )
 
 import numpy as np
@@ -46,13 +46,13 @@ def perform_ablation(ablation: Ablation, features: Sequence[str]) -> Sequence[st
         return [
             feature
             for feature in features
-            if FEATURES_DESCRIPTION[feature]["level"] == "tree"
+            if FEATURES_METADATA[feature]["level"] == "tree"
         ]
     elif ablation == "plot-level-only":
         return [
             feature
             for feature in features
-            if FEATURES_DESCRIPTION[feature]["level"] == "plot"
+            if FEATURES_METADATA[feature]["level"] == "plot"
         ]
     elif (match := re.match(r"(.*)-defoliation", ablation)) is not None:
         prefix = match.group(1)
@@ -126,7 +126,7 @@ def prepare_data(
         )
 
     # Select the features and the transformed target
-    X = df.select(perform_ablation(ablation, list(FEATURES_DESCRIPTION.keys())))
+    X = df.select(perform_ablation(ablation, list(FEATURES_METADATA.keys())))
 
     X = cat_to_codes(X, CATEGORICAL_COLUMNS).fill_nan(None)
     y = df[TARGET]
