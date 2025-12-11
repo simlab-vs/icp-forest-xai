@@ -49,6 +49,7 @@ logging.basicConfig(
 )
 
 RANDOM_STATE = 42  # Global random state for reproducibility
+ALL_SPECIES: list[Species] = ["spruce", "pine", "beech", "oak"]
 
 np.random.seed(RANDOM_STATE)  # Set the global random seed for NumPy
 
@@ -248,25 +249,61 @@ class LGBMEstimator(EstimatorProtocol):
 
         def objective_fn(trial: Trial) -> float:
             # See https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html
-            grid = {
-                # num_leaves is the main parameter to control the complexity of the tree model.
-                "num_leaves": trial.suggest_int("num_leaves", 2, 256),
-                # max_depth is also used to control the complexity of the tree model.
-                "max_depth": trial.suggest_int("max_depth", -1, 15),
-                # min_data_in_leaf is a parameter to prevent over-fitting in a leaf-wise tree.
-                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 5, 1000),
-                # regularization
-                "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
-                "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
-                "min_split_gain": trial.suggest_float("min_gain_split", 0.0, 1.0),
-                # feature sub-sampling and bagging fractiog
-                "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
-                "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
-                "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-            }
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            max_depth = trial.suggest_categorical(
+                "max_depth", [-1, 3, 4, 5, 6, 7, 8, 9, 10, 12]
+            )
+
+            if max_depth == -1:
+                num_leaves = trial.suggest_int("num_leaves", 8, 256, log=True)
+            else:
+                num_leaves = trial.suggest_int(
+                    "num_leaves", 8, min(2**max_depth, 1024), log=True
+                )
+
+            min_child_samples = trial.suggest_int(
+                "min_child_samples", 5, 1000, log=True
+            )
+            min_sum_hessian_in_leaf = trial.suggest_float(
+                "min_sum_hessian_in_leaf", 1e-3, 10.0, log=True
+            )
+            lambda_l1 = trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True)
+            lambda_l2 = trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True)
+            min_split_gain = trial.suggest_float("min_split_gain", 0.0, 2.0)
+            feature_fraction = trial.suggest_float("feature_fraction", 0.5, 1.0)
+            bagging_fraction = trial.suggest_float("bagging_fraction", 0.5, 1.0)
+
+            if bagging_fraction < 0.999:
+                bagging_freq = trial.suggest_int("bagging_freq", 1, 7)
+            else:
+                bagging_freq = 0
+
+            max_bin = trial.suggest_int("max_bin", 127, 511, log=True)
+            extra_trees = trial.suggest_categorical("extra_trees", [False, True])
+            path_smooth = trial.suggest_float("path_smooth", 0.0, 1.0)
+
+            params = dict(
+                learning_rate=learning_rate,
+                max_depth=max_depth,
+                num_leaves=num_leaves,
+                min_child_samples=min_child_samples,
+                min_sum_hessian_in_leaf=min_sum_hessian_in_leaf,
+                lambda_l1=lambda_l1,
+                lambda_l2=lambda_l2,
+                min_split_gain=min_split_gain,
+                feature_fraction=feature_fraction,
+                bagging_fraction=bagging_fraction,
+                bagging_freq=bagging_freq,
+                max_bin=max_bin,
+                extra_trees=extra_trees,
+                path_smooth=path_smooth,
+                boosting_type="gbdt",
+                objective="regression",
+                metric="rmse",
+            )
 
             estimator = LGBMRegressor(
-                **grid,
+                **params,  # type: ignore[arg-type]
                 force_row_wise=True,
                 verbosity=self.verbosity,
                 random_state=self.random_state,
