@@ -413,7 +413,7 @@ FEATURES_METADATA = {
     },
     "soph_avg_age": {
         "description": "Average age of the trees",
-        "label": "Plot age",
+        "label": "Stand age",
         "level": "plot",
         "unit": "years",
     },

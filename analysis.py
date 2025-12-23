@@ -109,7 +109,8 @@ def summarize_performance(
                 .with_columns(
                     mean_r2=pl.mean_horizontal(
                         cs.by_name("spruce", "pine", "beech", "oak")
-                        .str.slice(0, precision + 1)
+                        .str.split(" ± ")
+                        .list.get(0)
                         .cast(pl.Float64)
                     ).round(2),
                 )

@@ -38,7 +38,7 @@ warnings.filterwarnings(
 )
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["lgbm", "lasso"]
+ModelType = Literal["gbdt", "lasso"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -630,7 +630,7 @@ def train_and_explain(
     species
         Species to train the model for.
     model_type
-        Type of model to use for training, either "lgbm" or "lasso".
+        Type of model to use for training, either "gbdt" or "lasso".
     group_by
         Column to group by for cross-validation.
     cv
@@ -665,7 +665,7 @@ def train_and_explain(
         splitter.split(to_numpy(X), y, groups=to_numpy(groups))
     ):
         # Create estimator
-        if model_type == "lgbm":
+        if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)
 
             estimator = LGBMEstimator(

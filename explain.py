@@ -33,6 +33,7 @@ def plot_dependence(
     ax: Axes | None = None,
     color: str = "#1f77b4",
     plot_type: PlotType = PlotType.SCATTER,
+    with_density: bool = True,
     **kwargs: Any,
 ) -> Axes:
     """Plot SHAP dependence plot for a given feature.
@@ -65,6 +66,8 @@ def plot_dependence(
         Color of the scatter points.
     plot_type
         Type of plot to create (scatter or line).
+    with_density
+        Whether to overlay a density histogram at the bottom of the plot.
     **kwargs
         Additional keyword arguments to pass to the scatter plot.
 
@@ -107,7 +110,7 @@ def plot_dependence(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
-    # Enlarge slightly the limits for better visibility
+    # Define x and y limits if not provided
     if xlim is None:
         xlim = (
             np.nanmin(results.X[indices, feature]),
@@ -120,11 +123,17 @@ def plot_dependence(
             np.nanmax(shap_values),
         )  # type: ignore
 
+    # Filter out NaN values and out of bounds values
+    valid_indices = (
+        ~np.isnan(feature_values)
+        & (xlim[0] <= feature_values)
+        & (feature_values <= xlim[1])
+    )
+
+    # Add some padding to the limits
     xlim = (xlim[0] - 0.05 * (xlim[1] - xlim[0]), xlim[1] + 0.05 * (xlim[1] - xlim[0]))
     ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))  # type: ignore
 
-    # Get indices for which the feature values are not NaN
-    valid_indices = ~np.isnan(feature_values)
     xwidth = xlim[1] - xlim[0]
     ywidth = ylim[1] - ylim[0]
 
@@ -141,10 +150,14 @@ def plot_dependence(
     elif plot_type == PlotType.SCATTER:
         wiggle = 0.005
         xwiggle = np.random.uniform(
-            -wiggle * xwidth, wiggle * xwidth, size=np.sum(valid_indices)
+            -wiggle * xwidth,
+            wiggle * xwidth,
+            size=np.sum(valid_indices),  # type: ignore
         )
         ywiggle = np.random.uniform(
-            -wiggle * ywidth, wiggle * ywidth, size=np.sum(valid_indices)
+            -wiggle * ywidth,
+            wiggle * ywidth,
+            size=np.sum(valid_indices),  # type: ignore
         )
         sns.scatterplot(
             x=feature_values[valid_indices] + xwiggle,
@@ -181,7 +194,8 @@ def plot_dependence(
 
             if label is not None:
                 ax.legend([label])
-    elif plot_type == PlotType.DENSITY:
+
+    if plot_type == PlotType.DENSITY or with_density:
         # Overlaid inset axes for histogram with the same x-axis limits
         ax2 = ax.inset_axes(
             bounds=(0, 0, 1.0, 0.2),
@@ -209,6 +223,7 @@ def plot_dependence(
             legend=False,
             ax=ax2,
             bins=50,
+            binrange=xlim,
             stat="density",
             color="grey",
             alpha=0.3,
@@ -217,8 +232,6 @@ def plot_dependence(
 
         if label is not None:
             ax.collections[-1].set_label(label)
-    else:
-        raise ValueError(f"Unknown plot type: {plot_type}")
 
     # Draw the line that indicates no effect
     if show_no_effect:
