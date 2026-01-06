@@ -2,8 +2,7 @@
 
 This repository contains the code to reproduce the results of the study
 "Drivers of tree growth across Europe: an explainable AI analysis of
-tree- and site-level influences", submitted to *Journal of Forest Ecology
-and Management*.
+tree- and site-level influences", submitted to *Ecological Informatics*.
 
 ![Graphical abstract of paper](./figures/graphical-abstract.png)
 
