@@ -96,7 +96,7 @@ def load_data(species: Species) -> pl.DataFrame:
 
 def prepare_data(
     df: pl.DataFrame, ablation: Ablation = "all", plotting: bool = False
-) -> tuple[pl.DataFrame, pl.Series]:
+) -> tuple[pl.DataFrame, pl.Series, tuple[float, float, float]]:
     """Prepare the data for training.
 
     We normalize the target variable by fitting a log-normal distribution to it and
@@ -172,7 +172,7 @@ def prepare_data(
     y_log_norm = lognorm.cdf(y_plus_one, shape, loc, scale)
     y_log_norm = pl.Series(y_log_norm, dtype=pl.Float64)
 
-    return X, y_log_norm
+    return X, y_log_norm, (shape, loc, scale)
 
 
 def cat_to_codes(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:

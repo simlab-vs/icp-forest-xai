@@ -9,12 +9,14 @@ from sklearn.linear_model import LassoCV, Lasso
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
-from sklearn.metrics import mean_squared_error, make_scorer
+from sklearn.metrics import mean_squared_error, make_scorer, r2_score
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
 import optuna
 from optuna.trial import Trial
+
+from scipy.stats import lognorm
 
 import sys
 import contextlib
@@ -493,6 +495,7 @@ class ExperimentResults:
 
     shap_values: Sequence[Explanation]
 
+    dist_params: tuple[float, float, float] | None = None 
     @property
     def num_folds(self) -> int:
         return len(self.y_pred)
@@ -602,6 +605,7 @@ class ExperimentResults:
         )
 
         return interactions, indices
+    
 
 
 @dataclass
@@ -648,8 +652,8 @@ def train_and_explain(
     df = load_data(species)
 
     # Prepare data
-    X, y = prepare_data(df, ablation)
-
+    X, y, dist_params = prepare_data(df, ablation)
+    
     # Prepare groups
     if group_by is not None:
         groups = df.select(group_by).to_series()
@@ -792,4 +796,5 @@ def train_and_explain(
             for fold in range(cv)
         ],
         shap_values=shap_values,
+        dist_params = dist_params,
     )
