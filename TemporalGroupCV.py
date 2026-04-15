@@ -80,7 +80,6 @@ class TemporalGroupCV(BaseCrossValidator):
                 )
             ).drop("count")
             
-            # Fix: Added check for empty intervals
             if len(intervals) == 0:
                 continue
                 
@@ -128,8 +127,6 @@ class TemporalGroupCV(BaseCrossValidator):
         splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
         
         for fold, (train_idx, test_idx) in enumerate(splitter.split(to_numpy(X), y, groups=to_numpy(groups))):
-            # print(f"Fold group K fold{fold}: {len(train_idx)} {len(test_idx)}")
-            # print(f"Fold temporal group {fold}: {len(self.train_indices_)} {len(self.test_indices_)}")
             temp_train = np.intersect1d(train_idx, self.train_indices_)
             temp_test = np.intersect1d(test_idx, self.test_indices_)
             
