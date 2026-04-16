@@ -9,6 +9,7 @@ dependencies = [
     "cmocean>=4.0.3",
     "ipykernel>=6.29.5",
     "joblib>=1.4.2",
+    "jupyter>=1.1.1",
     "lightgbm>=4.5.0",
     "marimo>=0.11.24",
     "matplotlib>=3.10.0",
