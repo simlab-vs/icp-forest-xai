@@ -5,6 +5,11 @@ build/
 dist/
 wheels/
 *.egg-info
+.DS_Store
+.ipynb_checkpoints
+
+# Data
+data
 
 # Temporary directories
 .cache
