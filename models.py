@@ -9,7 +9,7 @@ from sklearn.linear_model import LassoCV, Lasso
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
-from sklearn.metrics import mean_squared_error, make_scorer, r2_score
+from sklearn.metrics import mean_squared_error, make_scorer, r2_score, root_mean_squared_error
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
@@ -157,6 +157,21 @@ class EstimatorProtocol(Protocol):
         -------
         The R2 score of the regressor on the given data."""
         return r2_score(y_true, self.predict(X))
+    
+    def rmse(self, X: MatrixLike, y_true: VectorLike) -> float:
+        """Compute the score of the regressor on the given data.
+
+        Parameters
+        ----------
+        X
+            Features to predict on.
+        y_true
+            True target values to compute the score against.
+
+        Returns
+        -------
+        The R2 score of the regressor on the given data."""
+        return root_mean_squared_error(y_true, self.predict(X))
 
 
 class LGBMEstimator(EstimatorProtocol):
@@ -612,6 +627,8 @@ class ExperimentResults:
 class CrossValidationResults:
     test_r2: list[float] = field(default_factory=list)
     train_r2: list[float] = field(default_factory=list)
+    test_rmse: list[float] = field(default_factory=list)
+    train_rmse: list[float] = field(default_factory=list)
     estimator: list[EstimatorProtocol] = field(default_factory=list)
     indices: dict[Split, list[pl.Series]] = field(
         default_factory=lambda: {"train": [], "test": []}
@@ -653,7 +670,8 @@ def train_and_explain(
 
     # Prepare data
     X, y, dist_params = prepare_data(df, ablation)
-    
+    shape, loc, scale = dist_params
+
     # Prepare groups
     if group_by is not None:
         groups = df.select(group_by).to_series()
@@ -720,10 +738,14 @@ def train_and_explain(
         # Evaluate the model
         r2_train = estimator.score(X_train, y_train)
         r2_test = estimator.score(X_test, y_test)
+        rmse_train = estimator.rmse(X_train, y_train)
+        rmse_test = estimator.rmse(X_test, y_test)
 
         # Update cross-validation results
         results.test_r2.append(r2_test)
         results.train_r2.append(r2_train)
+        results.test_rmse.append(rmse_test)
+        results.train_rmse.append(rmse_train)
         results.estimator.append(estimator)
         results.indices["train"].append(pl.Series("train_idx", train_idx))
         results.indices["test"].append(pl.Series("test_idx", test_idx))
@@ -792,6 +814,8 @@ def train_and_explain(
             {
                 "test_r2": float(results.test_r2[fold]),
                 "train_r2": float(results.train_r2[fold]),
+                "test_rmse": float(results.test_rmse[fold]),
+                "train_rmse": float(results.train_rmse[fold]),
             }
             for fold in range(cv)
         ],
