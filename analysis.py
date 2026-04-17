@@ -51,6 +51,8 @@ def summarize_performance(
                 "train_r2",
                 "test_rmse",
                 "train_rmse",
+                "n_train",
+                "n_test",
             )
             for species, results in all_results.items()
         ],
@@ -68,6 +70,18 @@ def summarize_performance(
             pl.std("test_rmse").alias("std_test_rmse"),
             pl.mean("train_rmse").alias("mean_train_rmse"),
             pl.std("train_rmse").alias("std_train_rmse"),
+            pl.mean("n_test").round().cast(pl.Int32).alias("n_test"),
+            pl.mean("n_train").round().cast(pl.Int32).alias("n_train")
+        )
+        .with_columns(
+        weight_test = pl.col("n_test")/pl.sum("n_test").over(pl.lit(True)),
+        weight_train = pl.col("n_train")/pl.sum("n_train").over(pl.lit(True))
+        )
+        .with_columns(
+            weight_test_r2 = pl.col("weight_test")*pl.col("mean_test_r2"),
+            weight_test_rmse = pl.col("weight_test")*pl.col("mean_test_rmse"),
+            weight_train_r2 = pl.col("weight_train")*pl.col("mean_train_r2"),
+            weight_train_rmse = pl.col("weight_test")*pl.col("mean_train_rmse")
         )
         .select(
             "species",
@@ -83,9 +97,16 @@ def summarize_performance(
             train_rmse = pl.col("mean_train_rmse").round(precision).cast(pl.Utf8)
             + " ± "
             + pl.col("std_train_rmse").round(precision).cast(pl.Utf8),
+            weight = pl.col("weight_test").round(precision).cast(pl.Utf8),
+        
+            test_weight_r2 = pl.col("weight_test_r2").round(precision).cast(pl.Utf8),
+            test_weight_rmse = pl.col("weight_test_rmse").round(precision).cast(pl.Utf8),
+
+            train_weight_r2 = pl.col("weight_train_r2").round(precision).cast(pl.Utf8),
+            train_weight_rmse = pl.col("weight_train_rmse").round(precision).cast(pl.Utf8)
         )
-        .unpivot(index="species")
-        .pivot(index="variable", on="species", values="value")
+        .unpivot(index=["species"])
+        .pivot(index=["variable"], on="species", values="value")
         .rename({"variable": "split"})
         .select(
             pl.lit(ablation).cast(pl.Utf8).alias("ablation"),
@@ -103,7 +124,7 @@ def summarize_performance(
 
     # Sort the performance DataFrame for better readability
     perf = perf.sort(PERF_KEYS).select(
-        cs.by_dtype(pl.Utf8).str.replace_all("+/-", "±", literal=True).name.keep()
+        cs.by_dtype(pl.Utf8).str.replace_all("+/-", "±", literal=True).name.keep(),
     )
 
     perf.write_csv(PERF_CSV)
@@ -115,9 +136,26 @@ def summarize_performance(
 
         for group_by in perf["group_by"].unique().sort():
             print(f"\nPerformance summary for group_by='{group_by}':")
+            
+            weighted = perf.filter(pl.col("group_by")==group_by
+                        ).filter(pl.col("split").str.contains("weight")
+                        ).filter(pl.col("split").str.starts_with("test")
+                        ).with_columns(
+                            weighted =pl.sum_horizontal(
+                                    cs.by_name("spruce", "pine", "beech", "oak")
+                                    .cast(pl.Float64)
+                                    ).round(2),
+                            ).select(cs.all().exclude("group_by"))
+
+            weighted = weighted.select(["ablation", "model", "split", "weighted"]
+                                ).with_columns(
+                                pl.col("split").str.replace("_weight", "").alias("split")
+                                            )
+            
             print(
                 perf.filter(pl.col("group_by") == group_by)
                 .filter(pl.col("split").str.starts_with("test"))
+                .filter(~pl.col("split").str.contains("weight"))
                 .with_columns(
                     mean_metric=pl.mean_horizontal(
                         cs.by_name("spruce", "pine", "beech", "oak")
@@ -131,5 +169,7 @@ def summarize_performance(
                         lambda x: check_significance(x, k=5), return_dtype=pl.Utf8
                     )
                 )
-                .select(cs.all().exclude("group_by"))
+                .select(cs.all().exclude("group_by" ))
+                .join(weighted, on=["ablation", "model", "split"], how="left")
+
             )

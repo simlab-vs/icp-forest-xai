@@ -9,7 +9,7 @@ from sklearn.linear_model import LassoCV, Lasso
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
-from sklearn.metrics import mean_squared_error, make_scorer, r2_score, root_mean_squared_error
+from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
@@ -816,6 +816,8 @@ def train_and_explain(
                 "train_r2": float(results.train_r2[fold]),
                 "test_rmse": float(results.test_rmse[fold]),
                 "train_rmse": float(results.train_rmse[fold]),
+                "n_train": len(results.indices["train"][fold]),
+                "n_test": len(results.indices["test"][fold]),
             }
             for fold in range(cv)
         ],
