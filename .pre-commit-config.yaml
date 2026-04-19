@@ -18,13 +18,15 @@ repos:
         args:
           - --fix
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.8
+  - repo: local
     hooks:
       - id: ruff
-        args: [ --fix ]
-      - id: ruff-format
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
 
+<<<<<<< HEAD
   - repo: local
     hooks:
       - id: ty
@@ -37,3 +39,17 @@ repos:
     rev: 0.9.1
     hooks:
       - id: nbstripout
+=======
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      - id: ty
+        name: ty
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
+>>>>>>> 9db6536 (ci: add GitHub Actions workflow and migrate pre-commit hooks to uv run)
