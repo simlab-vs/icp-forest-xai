@@ -615,7 +615,6 @@ class ExperimentResults:
         )
 
         return interactions, indices
-    
 
 
 @dataclass
