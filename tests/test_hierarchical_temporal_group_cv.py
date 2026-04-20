@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import os
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
+sys.path.insert(0, str(project_root))
 
 # Stub external project modules before importing the class under test
 _models_mock = MagicMock()
