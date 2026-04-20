@@ -24,6 +24,14 @@ dependencies = [
     "torch>=2.6.0",
 ]
 
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
+[tool.ty.src]
+exclude = ["**/*.ipynb"]
+
+[tool.ty.environment]
+python = ".venv"
+
+[dependency-groups]
+dev = [
+    "nbstripout>=0.9.1",
+    "pre-commit>=4.5.1",
+]
