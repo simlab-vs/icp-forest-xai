@@ -637,6 +637,7 @@ def train_and_explain(
     group_by: str | None,
     cv: int = 5,
     n_jobs: int = -1,
+    use_temporal_cv: bool = False,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -672,14 +673,30 @@ def train_and_explain(
     else:
         groups = None
 
+    # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
+    if use_temporal_cv:
+        from HierarchicalTemporaGroupCV import HierarchicalTimeGroupCV
+
+        temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
+        splits = []
+        for fold, (train_idx, test_idx) in enumerate(
+            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+        ):
+            splits.append((train_idx, test_idx))
+    else:
+        splits = []
+        splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+        for fold, (train_idx, test_idx) in enumerate(
+            splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+        ):
+            splits.append((train_idx, test_idx))
+
     # Cross-validation loop
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
     results = CrossValidationResults()
-    splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(to_numpy(X), y, groups=to_numpy(groups))
-    ):
+    # splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+    for fold, (train_idx, test_idx) in enumerate(splits):
         # Create estimator
         if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)
