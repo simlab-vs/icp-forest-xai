@@ -83,7 +83,7 @@ def plot_dependence(
         shap_values = (
             np.concatenate(
                 [
-                    results.shap_values[fold][:, feature].values  # type: ignore
+                    results.shap_values[fold][:, feature].values
                     for fold in range(results.num_folds)
                 ],
                 dtype=np.float64,
@@ -91,7 +91,7 @@ def plot_dependence(
         ) * 100
         feature_values = np.concatenate(
             [
-                results.shap_values[fold][:, feature].data  # type: ignore
+                results.shap_values[fold][:, feature].data
                 for fold in range(results.num_folds)
             ],
             dtype=np.float64,
@@ -104,8 +104,8 @@ def plot_dependence(
 
         indices = results.get_indices(fold, "all")
 
-        shap_values = (cast(np.ndarray, shap_struct.values).astype(np.float64)) * 100  # type: ignore
-        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)  # type: ignore
+        shap_values = (cast(np.ndarray, shap_struct.values).astype(np.float64)) * 100
+        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -121,7 +121,7 @@ def plot_dependence(
         ylim = (
             np.nanmin(shap_values),
             np.nanmax(shap_values),
-        )  # type: ignore
+        )
 
     # Filter out NaN values and out of bounds values
     valid_indices = (
@@ -132,7 +132,7 @@ def plot_dependence(
 
     # Add some padding to the limits
     xlim = (xlim[0] - 0.05 * (xlim[1] - xlim[0]), xlim[1] + 0.05 * (xlim[1] - xlim[0]))
-    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))  # type: ignore
+    ylim = (ylim[0] - 0.05 * (ylim[1] - ylim[0]), ylim[1] + 0.05 * (ylim[1] - ylim[0]))
 
     xwidth = xlim[1] - xlim[0]
     ywidth = ylim[1] - ylim[0]
@@ -152,12 +152,12 @@ def plot_dependence(
         xwiggle = np.random.uniform(
             -wiggle * xwidth,
             wiggle * xwidth,
-            size=np.sum(valid_indices),  # type: ignore
+            size=np.sum(valid_indices),
         )
         ywiggle = np.random.uniform(
             -wiggle * ywidth,
             wiggle * ywidth,
-            size=np.sum(valid_indices),  # type: ignore
+            size=np.sum(valid_indices),
         )
         sns.scatterplot(
             x=feature_values[valid_indices] + xwiggle,
@@ -315,12 +315,12 @@ def plot_ceteris_paribus_profile(
         plt.figure(figsize=(6, 4))
         ax = plt.gca()
 
-    ax.plot(feature_range, y_pred)  # type: ignore
+    ax.plot(feature_range, y_pred)
 
     # Draw circle at the instance value
     ax.scatter(
         instance.item(0, feature),
-        estimator.predict(instance),  # type: ignore
+        estimator.predict(instance),
         color="red",
         s=100,
         label="Instance",
@@ -441,7 +441,7 @@ def compute_interaction_matrix(
 
         pcm = ax.imshow(
             np.absolute(interacts_no_diag).mean(axis=0),
-            cmap=cmocean.cm.thermal,  # type: ignore[attr-defined]
+            cmap=cmocean.cm.thermal,  # type: ignore
             vmin=0.0,
             vmax=vmax,
         )

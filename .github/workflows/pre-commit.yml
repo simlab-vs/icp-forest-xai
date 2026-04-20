@@ -9,7 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv tool install ty==0.0.31
       - uses: pre-commit/action@v3.0.1
+        env:
+          PRE_COMMIT_HOME: ~/.cache/pre-commit
