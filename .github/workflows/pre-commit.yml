@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
       - run: uv sync
       - run: uv tool install ty==0.0.31
       - uses: pre-commit/action@v3.0.1
