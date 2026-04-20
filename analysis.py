@@ -17,7 +17,7 @@ def check_significance(metric: str, k: int = 5) -> str:
     # Perform a t-test to check if the R2/rmse value is significantly positive
     standard_error = float(metric_error) / np.sqrt(k)
     t_statistic = float(metric_value) / standard_error
-   
+
     # Calculate the p-value
     p_value = stats.t.sf(t_statistic, k - 1)
 
@@ -71,17 +71,17 @@ def summarize_performance(
             pl.mean("train_rmse").alias("mean_train_rmse"),
             pl.std("train_rmse").alias("std_train_rmse"),
             pl.mean("n_test").round().cast(pl.Int32).alias("n_test"),
-            pl.mean("n_train").round().cast(pl.Int32).alias("n_train")
+            pl.mean("n_train").round().cast(pl.Int32).alias("n_train"),
         )
         .with_columns(
-        weight_test = pl.col("n_test")/pl.sum("n_test").over(pl.lit(True)),
-        weight_train = pl.col("n_train")/pl.sum("n_train").over(pl.lit(True))
+            weight_test=pl.col("n_test") / pl.sum("n_test").over(pl.lit(True)),
+            weight_train=pl.col("n_train") / pl.sum("n_train").over(pl.lit(True)),
         )
         .with_columns(
-            weight_test_r2 = pl.col("weight_test")*pl.col("mean_test_r2"),
-            weight_test_rmse = pl.col("weight_test")*pl.col("mean_test_rmse"),
-            weight_train_r2 = pl.col("weight_train")*pl.col("mean_train_r2"),
-            weight_train_rmse = pl.col("weight_test")*pl.col("mean_train_rmse")
+            weight_test_r2=pl.col("weight_test") * pl.col("mean_test_r2"),
+            weight_test_rmse=pl.col("weight_test") * pl.col("mean_test_rmse"),
+            weight_train_r2=pl.col("weight_train") * pl.col("mean_train_r2"),
+            weight_train_rmse=pl.col("weight_test") * pl.col("mean_train_rmse"),
         )
         .select(
             "species",
@@ -91,19 +91,19 @@ def summarize_performance(
             train_r2=pl.col("mean_train_r2").round(precision).cast(pl.Utf8)
             + " ± "
             + pl.col("std_train_r2").round(precision).cast(pl.Utf8),
-            test_rmse = pl.col("mean_test_rmse").round(precision).cast(pl.Utf8)
+            test_rmse=pl.col("mean_test_rmse").round(precision).cast(pl.Utf8)
             + " ± "
             + pl.col("std_test_rmse").round(precision).cast(pl.Utf8),
-            train_rmse = pl.col("mean_train_rmse").round(precision).cast(pl.Utf8)
+            train_rmse=pl.col("mean_train_rmse").round(precision).cast(pl.Utf8)
             + " ± "
             + pl.col("std_train_rmse").round(precision).cast(pl.Utf8),
-            weight = pl.col("weight_test").round(precision).cast(pl.Utf8),
-        
-            test_weight_r2 = pl.col("weight_test_r2").round(precision).cast(pl.Utf8),
-            test_weight_rmse = pl.col("weight_test_rmse").round(precision).cast(pl.Utf8),
-
-            train_weight_r2 = pl.col("weight_train_r2").round(precision).cast(pl.Utf8),
-            train_weight_rmse = pl.col("weight_train_rmse").round(precision).cast(pl.Utf8)
+            weight=pl.col("weight_test").round(precision).cast(pl.Utf8),
+            test_weight_r2=pl.col("weight_test_r2").round(precision).cast(pl.Utf8),
+            test_weight_rmse=pl.col("weight_test_rmse").round(precision).cast(pl.Utf8),
+            train_weight_r2=pl.col("weight_train_r2").round(precision).cast(pl.Utf8),
+            train_weight_rmse=pl.col("weight_train_rmse")
+            .round(precision)
+            .cast(pl.Utf8),
         )
         .unpivot(index=["species"])
         .pivot(index=["variable"], on="species", values="value")
@@ -136,22 +136,23 @@ def summarize_performance(
 
         for group_by in perf["group_by"].unique().sort():
             print(f"\nPerformance summary for group_by='{group_by}':")
-            
-            weighted = perf.filter(pl.col("group_by")==group_by
-                        ).filter(pl.col("split").str.contains("weight")
-                        ).filter(pl.col("split").str.starts_with("test")
-                        ).with_columns(
-                            weighted =pl.sum_horizontal(
-                                    cs.by_name("spruce", "pine", "beech", "oak")
-                                    .cast(pl.Float64)
-                                    ).round(2),
-                            ).select(cs.all().exclude("group_by"))
 
-            weighted = weighted.select(["ablation", "model", "split", "weighted"]
-                                ).with_columns(
-                                pl.col("split").str.replace("_weight", "").alias("split")
-                                            )
-            
+            weighted = (
+                perf.filter(pl.col("group_by") == group_by)
+                .filter(pl.col("split").str.contains("weight"))
+                .filter(pl.col("split").str.starts_with("test"))
+                .with_columns(
+                    weighted=pl.sum_horizontal(
+                        cs.by_name("spruce", "pine", "beech", "oak").cast(pl.Float64)
+                    ).round(2),
+                )
+                .select(cs.all().exclude("group_by"))
+            )
+
+            weighted = weighted.select(
+                ["ablation", "model", "split", "weighted"]
+            ).with_columns(pl.col("split").str.replace("_weight", "").alias("split"))
+
             print(
                 perf.filter(pl.col("group_by") == group_by)
                 .filter(pl.col("split").str.starts_with("test"))
@@ -169,7 +170,6 @@ def summarize_performance(
                         lambda x: check_significance(x, k=5), return_dtype=pl.Utf8
                     )
                 )
-                .select(cs.all().exclude("group_by" ))
+                .select(cs.all().exclude("group_by"))
                 .join(weighted, on=["ablation", "model", "split"], how="left")
-
             )

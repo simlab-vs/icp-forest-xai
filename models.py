@@ -16,7 +16,6 @@ import joblib
 import optuna
 from optuna.trial import Trial
 
-from scipy.stats import lognorm
 
 import sys
 import contextlib
@@ -157,7 +156,7 @@ class EstimatorProtocol(Protocol):
         -------
         The R2 score of the regressor on the given data."""
         return r2_score(y_true, self.predict(X))
-    
+
     def rmse(self, X: MatrixLike, y_true: VectorLike) -> float:
         """Compute the score of the regressor on the given data.
 
@@ -299,7 +298,7 @@ class LGBMEstimator(EstimatorProtocol):
             extra_trees = trial.suggest_categorical("extra_trees", [False, True])
             path_smooth = trial.suggest_float("path_smooth", 0.0, 1.0)
 
-            params = dict(
+            estimator = LGBMRegressor(
                 learning_rate=learning_rate,
                 max_depth=max_depth,
                 num_leaves=num_leaves,
@@ -317,10 +316,6 @@ class LGBMEstimator(EstimatorProtocol):
                 boosting_type="gbdt",
                 objective="regression",
                 metric="rmse",
-            )
-
-            estimator = LGBMRegressor(
-                **params,  # type: ignore[arg-type]
                 force_row_wise=True,
                 verbosity=self.verbosity,
                 random_state=self.random_state,
@@ -510,7 +505,8 @@ class ExperimentResults:
 
     shap_values: Sequence[Explanation]
 
-    dist_params: tuple[float, float, float] | None = None 
+    dist_params: tuple[float, float, float] | None = None
+
     @property
     def num_folds(self) -> int:
         return len(self.y_pred)
@@ -620,7 +616,6 @@ class ExperimentResults:
         )
 
         return interactions, indices
-    
 
 
 @dataclass
@@ -822,5 +817,5 @@ def train_and_explain(
             for fold in range(cv)
         ],
         shap_values=shap_values,
-        dist_params = dist_params,
+        dist_params=dist_params,
     )

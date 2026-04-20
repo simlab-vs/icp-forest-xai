@@ -174,7 +174,7 @@ def prepare_data(
     y_log_norm = pl.Series(y_log_norm, dtype=pl.Float64)
 
     return X, y_log_norm, (shape, loc, scale)
-    
+
 
 def cat_to_codes(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
     """Convert categorical columns to codes"""
