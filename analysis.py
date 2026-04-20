@@ -40,7 +40,7 @@ def summarize_performance(
     ablation: Ablation,
     model_type: ModelType,
     group_col: str,
-    use_temporal_cv = False,
+    use_temporal_cv=False,
     precision: int = 2,
 ) -> None:
     perf = pl.concat(
