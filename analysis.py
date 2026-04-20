@@ -40,6 +40,7 @@ def summarize_performance(
     ablation: Ablation,
     model_type: ModelType,
     group_col: str,
+    use_temporal_cv = False,
     precision: int = 2,
 ) -> None:
     perf = pl.concat(
@@ -135,7 +136,11 @@ def summarize_performance(
         cfg.set_tbl_hide_column_data_types(True)
 
         for group_by in perf["group_by"].unique().sort():
-            print(f"\nPerformance summary for group_by='{group_by}':")
+            if use_temporal_cv:
+                temporal_str = "with temporal blocking"
+            else:
+                temporal_str = "without temporal blocking"
+            print(f"\nPerformance summary for group_by='{group_by}' {temporal_str}:")
 
             weighted = (
                 perf.filter(pl.col("group_by") == group_by)

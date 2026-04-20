@@ -373,15 +373,15 @@ class LGBMEstimator(EstimatorProtocol):
 
         # Fit the model using LightGBM
         self._lgbm.fit(
-            X.to_numpy() if isinstance(X, pl.DataFrame) else X,
-            y.to_numpy() if isinstance(y, pl.Series) else y,
+            to_numpy(X) if isinstance(X, pl.DataFrame) else X,
+            to_numpy(y) if isinstance(y, pl.Series) else y,
         )
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        return self._lgbm.predict(X)  # type: ignore[return-value]
+        return self._lgbm.predict(to_numpy(X))  # type: ignore[return-value]
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
