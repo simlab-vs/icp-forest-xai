@@ -14,6 +14,4 @@ jobs:
           python-version: "3.13"
       - run: uv sync
       - run: uv tool install ty==0.0.31
-      - uses: pre-commit/action@v3.0.1
-        env:
-          PRE_COMMIT_HOME: ~/.cache/pre-commit
+      - run: uv run pre-commit run --all-files
