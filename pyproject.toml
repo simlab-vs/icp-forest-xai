@@ -27,3 +27,9 @@ dependencies = [
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+
+[dependency-groups]
+dev = [
+    "nbstripout>=0.9.1",
+    "pre-commit>=4.5.1",
+]
