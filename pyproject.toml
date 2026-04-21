@@ -18,11 +18,14 @@ dependencies = [
     "plotly>=6.0.0",
     "polars>=1.21.0",
     "pyarrow>=19.0.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.11",
     "scikit-learn>=1.6.1",
     "seaborn>=0.13.2",
     "shap>=0.46.0",
     "statsmodels>=0.14.5",
     "torch>=2.6.0",
+    "ty>=0.0.31",
 ]
 
 [tool.ty.src]
@@ -35,4 +38,9 @@ python = ".venv"
 dev = [
     "nbstripout>=0.9.1",
     "pre-commit>=4.5.1",
+    "pytest>=9.0.3",
 ]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

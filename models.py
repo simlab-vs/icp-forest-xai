@@ -16,7 +16,6 @@ import joblib
 import optuna
 from optuna.trial import Trial
 
-
 import sys
 import contextlib
 import logging
@@ -374,15 +373,15 @@ class LGBMEstimator(EstimatorProtocol):
 
         # Fit the model using LightGBM
         self._lgbm.fit(
-            X.to_numpy() if isinstance(X, pl.DataFrame) else X,
-            y.to_numpy() if isinstance(y, pl.Series) else y,
+            to_numpy(X) if isinstance(X, pl.DataFrame) else X,
+            to_numpy(y) if isinstance(y, pl.Series) else y,
         )
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        return self._lgbm.predict(X)  # type: ignore[return-value]
+        return self._lgbm.predict(to_numpy(X))  # type: ignore[return-value]
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
@@ -638,6 +637,7 @@ def train_and_explain(
     group_by: str | None,
     cv: int = 5,
     n_jobs: int = -1,
+    use_temporal_cv: bool = False,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -673,14 +673,30 @@ def train_and_explain(
     else:
         groups = None
 
+    # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
+    if use_temporal_cv:
+        from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
+
+        temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
+        splits = []
+        for fold, (train_idx, test_idx) in enumerate(
+            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+        ):
+            splits.append((train_idx, test_idx))
+    else:
+        splits = []
+        splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+        for fold, (train_idx, test_idx) in enumerate(
+            splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+        ):
+            splits.append((train_idx, test_idx))
+
     # Cross-validation loop
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
     results = CrossValidationResults()
-    splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(to_numpy(X), y, groups=to_numpy(groups))
-    ):
+    # splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+    for fold, (train_idx, test_idx) in enumerate(splits):
         # Create estimator
         if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)

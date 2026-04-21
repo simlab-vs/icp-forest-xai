@@ -32,7 +32,7 @@ def check_significance(metric: str, k: int = 5) -> str:
 
 
 PERF_CSV = "./cache/performance_summary.csv"
-PERF_KEYS = ["group_by", "model", "split", "ablation"]
+PERF_KEYS = ["group_by", "model", "split", "ablation", "temporal_cv"]
 
 
 def summarize_performance(
@@ -40,6 +40,7 @@ def summarize_performance(
     ablation: Ablation,
     model_type: ModelType,
     group_col: str,
+    use_temporal_cv=False,
     precision: int = 2,
 ) -> None:
     perf = pl.concat(
@@ -112,6 +113,10 @@ def summarize_performance(
             pl.lit(ablation).cast(pl.Utf8).alias("ablation"),
             pl.lit(model_type).cast(pl.Utf8).alias("model"),
             pl.lit(group_col).cast(pl.Utf8).alias("group_by"),
+            pl.when(pl.lit(use_temporal_cv))
+            .then(pl.lit("yes"))
+            .otherwise(pl.lit("no"))
+            .alias("temporal_cv"),
             "split",
             *ALL_SPECIES,
         )
@@ -135,7 +140,11 @@ def summarize_performance(
         cfg.set_tbl_hide_column_data_types(True)
 
         for group_by in perf["group_by"].unique().sort():
-            print(f"\nPerformance summary for group_by='{group_by}':")
+            if use_temporal_cv:
+                temporal_str = "with temporal blocking"
+            else:
+                temporal_str = "without temporal blocking"
+            print(f"\nPerformance summary for group_by='{group_by}' {temporal_str}:")
 
             weighted = (
                 perf.filter(pl.col("group_by") == group_by)
