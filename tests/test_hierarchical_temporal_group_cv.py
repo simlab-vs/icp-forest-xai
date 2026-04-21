@@ -258,3 +258,37 @@ class TestTemporalSplit:
             assert train_trees.isdisjoint(test_trees), (
                 "Tree groups should not overlap between train and test"
             )
+
+    def test_no_coplot_coperiod_trees_split_across_train_and_test(self, cv):
+        """No two trees sharing the same (plot_id, period_id) may appear on
+        opposite sides of a fold — one in train, the other in test."""
+        X, y, tree_groups, period_group, plot_group = _make_split_inputs()
+        plot_group = np.asarray(plot_group)
+        period_group = np.asarray(period_group)
+        tree_groups = np.asarray(tree_groups)
+
+        for fold_idx, (train_idx, test_idx) in enumerate(
+            cv.temporal_split(X, y, tree_groups, period_group, plot_group)
+        ):
+            train_idx = np.asarray(train_idx)
+            test_idx = np.asarray(test_idx)
+
+            # Map each tree_id to the side of the split it landed on.
+            train_trees = set(tree_groups[train_idx])
+            test_trees = set(tree_groups[test_idx])
+
+            # Group tree_ids by (plot_id, period_id).
+            from collections import defaultdict
+
+            cell_to_trees: dict = defaultdict(set)
+            for i in range(len(tree_groups)):
+                cell_to_trees[(plot_group[i], period_group[i])].add(tree_groups[i])
+
+            for (plot_id, period_id), trees_in_cell in cell_to_trees.items():
+                cell_in_train = trees_in_cell & train_trees
+                cell_in_test = trees_in_cell & test_trees
+                assert not (cell_in_train and cell_in_test), (
+                    f"Fold {fold_idx}: trees {cell_in_train} (train) and "
+                    f"{cell_in_test} (test) share plot_id={plot_id}, "
+                    f"period_id={period_id}"
+                )
