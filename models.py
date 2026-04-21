@@ -675,7 +675,7 @@ def train_and_explain(
 
     # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
     if use_temporal_cv:
-        from HierarchicalTemporaGroupCV import HierarchicalTimeGroupCV
+        from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
 
         temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
         splits = []

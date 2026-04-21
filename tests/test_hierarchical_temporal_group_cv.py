@@ -20,7 +20,7 @@ _models_mock.to_numpy = np.asarray
 sys.modules.setdefault("data", MagicMock())
 sys.modules.setdefault("models", _models_mock)
 
-from HierarchicalTemporaGroupCV import HierarchicalTimeGroupCV  # noqa: E402
+from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
