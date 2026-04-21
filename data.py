@@ -133,7 +133,8 @@ def prepare_data(
 
     # Apply a log-normal transformation to the target if it is growth rate
     if TARGET != "growth_rate_rel":
-        return X, y
+        shape, loc, scale = 0.0, 0.0, 0.0
+        return X, y, (shape, loc, scale)
 
     y_plus_one = y + 1.0
     shape, loc, scale = lognorm.fit(y_plus_one)
