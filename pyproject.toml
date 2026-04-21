@@ -9,6 +9,7 @@ dependencies = [
     "cmocean>=4.0.3",
     "ipykernel>=6.29.5",
     "joblib>=1.4.2",
+    "jupyter>=1.1.1",
     "lightgbm>=4.5.0",
     "marimo>=0.11.24",
     "matplotlib>=3.10.0",
@@ -17,11 +18,27 @@ dependencies = [
     "plotly>=6.0.0",
     "polars>=1.21.0",
     "pyarrow>=19.0.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.11",
     "scikit-learn>=1.6.1",
     "seaborn>=0.13.2",
     "shap>=0.46.0",
     "statsmodels>=0.14.5",
     "torch>=2.6.0",
+    "ty>=0.0.31",
+]
+
+[tool.ty.src]
+exclude = ["**/*.ipynb"]
+
+[tool.ty.environment]
+python = ".venv"
+
+[dependency-groups]
+dev = [
+    "nbstripout>=0.9.1",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.3",
 ]
 
 [tool.pyright]

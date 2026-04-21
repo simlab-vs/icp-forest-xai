@@ -9,7 +9,7 @@ from sklearn.linear_model import LassoCV, Lasso
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
-from sklearn.metrics import mean_squared_error, make_scorer, r2_score
+from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
@@ -158,6 +158,21 @@ class EstimatorProtocol(Protocol):
         The R2 score of the regressor on the given data."""
         return r2_score(y_true, self.predict(X))
 
+    def rmse(self, X: MatrixLike, y_true: VectorLike) -> float:
+        """Compute the score of the regressor on the given data.
+
+        Parameters
+        ----------
+        X
+            Features to predict on.
+        y_true
+            True target values to compute the score against.
+
+        Returns
+        -------
+        The R2 score of the regressor on the given data."""
+        return root_mean_squared_error(y_true, self.predict(X))
+
 
 class LGBMEstimator(EstimatorProtocol):
     """LightGBM regressor."""
@@ -284,7 +299,7 @@ class LGBMEstimator(EstimatorProtocol):
             extra_trees = trial.suggest_categorical("extra_trees", [False, True])
             path_smooth = trial.suggest_float("path_smooth", 0.0, 1.0)
 
-            params = dict(
+            estimator = LGBMRegressor(
                 learning_rate=learning_rate,
                 max_depth=max_depth,
                 num_leaves=num_leaves,
@@ -302,10 +317,6 @@ class LGBMEstimator(EstimatorProtocol):
                 boosting_type="gbdt",
                 objective="regression",
                 metric="rmse",
-            )
-
-            estimator = LGBMRegressor(
-                **params,  # type: ignore[arg-type]
                 force_row_wise=True,
                 verbosity=self.verbosity,
                 random_state=self.random_state,
@@ -364,15 +375,15 @@ class LGBMEstimator(EstimatorProtocol):
 
         # Fit the model using LightGBM
         self._lgbm.fit(
-            X.to_numpy() if isinstance(X, pl.DataFrame) else X,
-            y.to_numpy() if isinstance(y, pl.Series) else y,
+            to_numpy(X) if isinstance(X, pl.DataFrame) else X,
+            to_numpy(y) if isinstance(y, pl.Series) else y,
         )
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        return self._lgbm.predict(X)  # type: ignore[return-value]
+        return self._lgbm.predict(to_numpy(X))  # type: ignore[return-value]
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
@@ -495,7 +506,8 @@ class ExperimentResults:
 
     shap_values: Sequence[Explanation]
 
-    dist_params: tuple[float, float, float] | None = None 
+    dist_params: tuple[float, float, float] | None = None
+
     @property
     def num_folds(self) -> int:
         return len(self.y_pred)
@@ -612,6 +624,8 @@ class ExperimentResults:
 class CrossValidationResults:
     test_r2: list[float] = field(default_factory=list)
     train_r2: list[float] = field(default_factory=list)
+    test_rmse: list[float] = field(default_factory=list)
+    train_rmse: list[float] = field(default_factory=list)
     estimator: list[EstimatorProtocol] = field(default_factory=list)
     indices: dict[Split, list[pl.Series]] = field(
         default_factory=lambda: {"train": [], "test": []}
@@ -626,6 +640,7 @@ def train_and_explain(
     group_by: str | None,
     cv: int = 5,
     n_jobs: int = -1,
+    use_temporal_cv: bool = False,
 ) -> ExperimentResults:
     """Train models for the given species.
 
@@ -653,21 +668,38 @@ def train_and_explain(
 
     # Prepare data
     X, y, dist_params = prepare_data(df, ablation)
-    
+    shape, loc, scale = dist_params
+
     # Prepare groups
     if group_by is not None:
         groups = df.select(group_by).to_series()
     else:
         groups = None
 
+    # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
+    if use_temporal_cv:
+        from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
+
+        temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
+        splits = []
+        for fold, (train_idx, test_idx) in enumerate(
+            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+        ):
+            splits.append((train_idx, test_idx))
+    else:
+        splits = []
+        splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+        for fold, (train_idx, test_idx) in enumerate(
+            splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+        ):
+            splits.append((train_idx, test_idx))
+
     # Cross-validation loop
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
     results = CrossValidationResults()
-    splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(to_numpy(X), y, groups=to_numpy(groups))
-    ):
+    # splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+    for fold, (train_idx, test_idx) in enumerate(splits):
         # Create estimator
         if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)
@@ -720,10 +752,14 @@ def train_and_explain(
         # Evaluate the model
         r2_train = estimator.score(X_train, y_train)
         r2_test = estimator.score(X_test, y_test)
+        rmse_train = estimator.rmse(X_train, y_train)
+        rmse_test = estimator.rmse(X_test, y_test)
 
         # Update cross-validation results
         results.test_r2.append(r2_test)
         results.train_r2.append(r2_train)
+        results.test_rmse.append(rmse_test)
+        results.train_rmse.append(rmse_train)
         results.estimator.append(estimator)
         results.indices["train"].append(pl.Series("train_idx", train_idx))
         results.indices["test"].append(pl.Series("test_idx", test_idx))
@@ -792,9 +828,13 @@ def train_and_explain(
             {
                 "test_r2": float(results.test_r2[fold]),
                 "train_r2": float(results.train_r2[fold]),
+                "test_rmse": float(results.test_rmse[fold]),
+                "train_rmse": float(results.train_rmse[fold]),
+                "n_train": len(results.indices["train"][fold]),
+                "n_test": len(results.indices["test"][fold]),
             }
             for fold in range(cv)
         ],
         shap_values=shap_values,
-        dist_params = dist_params,
+        dist_params=dist_params,
     )

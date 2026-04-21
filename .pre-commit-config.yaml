@@ -18,14 +18,23 @@ repos:
         args:
           - --fix
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.8
+  - repo: local
     hooks:
       - id: ruff
-        args: [ --fix ]
-      - id: ruff-format
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
 
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.407
-    hooks:
-      - id: pyright
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      - id: ty
+        name: ty
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
