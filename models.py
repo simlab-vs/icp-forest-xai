@@ -16,7 +16,6 @@ import joblib
 import optuna
 from optuna.trial import Trial
 
-from scipy.stats import lognorm
 
 import sys
 import contextlib
@@ -617,7 +616,6 @@ class ExperimentResults:
         )
 
         return interactions, indices
-    
 
 
 @dataclass
