@@ -32,7 +32,7 @@ def check_significance(metric: str, k: int = 5) -> str:
 
 
 PERF_CSV = "./cache/performance_summary.csv"
-PERF_KEYS = ["group_by", "model", "split", "ablation"]
+PERF_KEYS = ["group_by", "model", "split", "ablation", "temporal_cv"]
 
 
 def summarize_performance(
@@ -113,6 +113,10 @@ def summarize_performance(
             pl.lit(ablation).cast(pl.Utf8).alias("ablation"),
             pl.lit(model_type).cast(pl.Utf8).alias("model"),
             pl.lit(group_col).cast(pl.Utf8).alias("group_by"),
+            pl.when(pl.lit(use_temporal_cv))
+            .then(pl.lit("yes"))
+            .otherwise(pl.lit("no"))
+            .alias("temporal_cv"),
             "split",
             *ALL_SPECIES,
         )
