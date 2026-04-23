@@ -504,7 +504,7 @@ class ExperimentResults:
     performances: Sequence[dict[str, float]]
 
     shap_values: Sequence[Explanation]
-
+    shap_row_indices: Sequence[np.ndarray]
     dist_params: tuple[float, float, float] | None = None
 
     @property
@@ -566,10 +566,11 @@ class ExperimentResults:
                 f"No SHAP values available for fold {fold}. "
                 "Ensure that the model was trained with SHAP explanations."
             )
-
+        used_idx = self.shap_row_indices[fold]
         indices = self.get_indices(fold, split)
+        mask = np.isin(used_idx, indices)
 
-        return cast(Explanation, shap_values[indices])
+        return cast(Explanation, shap_values[mask])
 
     def get_shap_interactions(
         self, fold: int, split: Split = "test", num_samples: int | None = None
@@ -780,10 +781,17 @@ def train_and_explain(
     # Create SHAP explainers for the trained models
     explainers = []
     shap_values = []
+    shap_row_indices = []
 
     X_background = X.sample(1000, with_replacement=False)
 
-    for estimator in results.estimator:
+    for fold, estimator in enumerate(results.estimator):
+        train_idx = results.indices["train"][fold].to_numpy()
+        test_idx = results.indices["test"][fold].to_numpy()
+        # Since some data will be lost use temporal blocking
+        used_idx = np.concatenate([train_idx, test_idx])
+        X_used = X[used_idx]
+
         # Create a SHAP explainer for the LGBM model
         if isinstance(estimator, LGBMEstimator):
             explainer = TreeExplainer(
@@ -804,7 +812,8 @@ def train_and_explain(
             )
 
         explainers.append(explainer)
-        shap_values.append(explainer(X.to_numpy()))
+        shap_values.append(explainer(X_used.to_numpy()))
+        shap_row_indices.append(used_idx)
 
     return ExperimentResults(
         species=species,
@@ -835,4 +844,5 @@ def train_and_explain(
         ],
         shap_values=shap_values,
         dist_params=dist_params,
+        shap_row_indices=shap_row_indices,
     )
