@@ -155,7 +155,7 @@ def plot_dependence(
 
     if use_percentage:
         shap_values = shap_values * 100
-        
+
     # Define x and y limits if not provided
     if xlim is None:
         xlim = (
