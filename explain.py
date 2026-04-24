@@ -153,6 +153,9 @@ def plot_dependence(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
+    if use_percentage:
+        shap_values = shap_values * 100
+        
     # Define x and y limits if not provided
     if xlim is None:
         xlim = (
@@ -181,8 +184,6 @@ def plot_dependence(
     ywidth = ylim[1] - ylim[0]
 
     # Convert to percentage for better interpretability
-    if use_percentage:
-        shap_values = shap_values * 100
     if plot_type == PlotType.LINE:
         sns.lineplot(
             x=feature_values[valid_indices],
