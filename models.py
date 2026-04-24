@@ -693,7 +693,7 @@ class ExperimentResults:
             max_abs_err = np.max(np.abs(u_pred - y_pred))
             mean_abs_err = np.mean(np.abs(u_pred - y_pred))
 
-            print(
+            raise ValueError(
                 f"[WARNING] {self.species} fold {fold}: "
                 f"u_pred != y_pred "
                 f"(max abs err={max_abs_err:.6g}, "
