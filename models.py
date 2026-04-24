@@ -16,7 +16,6 @@ import joblib
 import optuna
 from optuna.trial import Trial
 
-
 import sys
 import contextlib
 import logging
@@ -24,6 +23,7 @@ import os
 
 import numpy as np
 import polars as pl
+from scipy.stats import lognorm
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, Sequence, cast, overload
@@ -505,7 +505,8 @@ class ExperimentResults:
 
     shap_values: Sequence[Explanation]
     shap_row_indices: Sequence[np.ndarray]
-    dist_params: tuple[float, float, float] | None = None
+    # dist_params: tuple[float, float, float] | None = None
+    dist_params: tuple[float | None, float | None, float | None] | None = None
 
     @property
     def num_folds(self) -> int:
@@ -517,9 +518,12 @@ class ExperimentResults:
 
     def get_indices(self, fold: int, split: Split) -> np.ndarray:
         """Get indices for the given fold and split."""
-        return (
-            self.indices[fold][split] if split != "all" else np.arange(self.X.shape[0])
-        )
+        if split == "all":
+            return np.concatenate(
+                [self.indices[fold]["train"], self.indices[fold]["test"]]
+            )
+        else:
+            return self.indices[fold][split]
 
     def get_data(
         self, fold: int, split: Split
@@ -617,6 +621,93 @@ class ExperimentResults:
         )
 
         return interactions, indices
+
+    def get_inverse_transform(
+        self, y: pl.Series, dist_params: tuple[float | None, float | None, float | None]
+    ) -> pl.Series:
+        """
+        Get the inverse transform for the given y.
+
+        This is used to transform the y values back to the original scale of the target variable.
+
+        Parameters
+        ----------
+        y
+            The y values to transform.
+        dist_params
+            A tuple containing the shape, location, and scale parameters of the log-normal distribution.
+
+        Returns
+        -------
+        The inverse transform for the given y.
+        """
+        shape, loc, scale = dist_params
+        if shape is None or loc is None or scale is None:
+            raise ValueError("dist_params contains None; cannot inverse transform.")
+        y_orig = pl.Series(
+            lognorm.ppf(
+                np.clip(to_numpy(y), 1e-6, 1 - 1e-6),
+                s=shape,
+                loc=loc,
+                scale=scale,
+            )
+            - 1
+        )
+
+        return y_orig
+
+    def get_shap_values_orig_space(
+        self, fold: int, split: Split = "test"
+    ) -> pl.DataFrame:
+        """
+        Get SHAP values in the original space of the target variable for the given fold.
+
+        Parameters
+        ----------
+        fold
+            Fold index.
+        split
+            Split type ('train', 'test', or 'all').
+
+        Returns
+        -------
+        SHAP values in the original space.
+        """
+
+        X, y_true, y_pred = self.get_data(fold, split)
+        shap_values = self.shap_values[fold].values
+        base_values = self.shap_values[fold].base_values
+        used_idx = self.shap_row_indices[fold]
+        indices = self.get_indices(fold, split)
+        mask = np.isin(used_idx, indices)
+
+        if self.dist_params is None:
+            raise ValueError(
+                "dist_params is None. Cannot compute importance in original space."
+            )
+
+        u_pred = base_values + shap_values.sum(axis=1)
+        u_pred = u_pred[mask]
+        # Check if SHAP reconstructs predictions
+        if not np.allclose(u_pred, y_pred, rtol=1e-6, atol=1e-6):
+            max_abs_err = np.max(np.abs(u_pred - y_pred))
+            mean_abs_err = np.mean(np.abs(u_pred - y_pred))
+
+            print(
+                f"[WARNING] {self.species} fold {fold}: "
+                f"u_pred != y_pred "
+                f"(max abs err={max_abs_err:.6g}, "
+                f"mean abs err={mean_abs_err:.6g})"
+            )
+
+        y_pred_orig = to_numpy(self.get_inverse_transform(y_pred, self.dist_params))
+        u_without = u_pred[:, None] - shap_values[mask]
+        y_without = to_numpy(
+            self.get_inverse_transform(pl.Series(u_without), self.dist_params)
+        )
+        delta_abs = y_pred_orig[:, None] - y_without
+
+        return pl.DataFrame(delta_abs, schema=self.features)
 
 
 @dataclass

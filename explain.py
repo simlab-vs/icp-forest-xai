@@ -25,6 +25,7 @@ def plot_dependence(
     fold: int | None = None,
     label: str | None = None,
     show_no_effect: bool = True,
+    original_space: bool = False,
     fit_func: Callable | None = None,
     fit_p0: tuple[float, float, float] | None = None,
     fit_formula: str | None = None,
@@ -77,35 +78,77 @@ def plot_dependence(
     """
     # If no alpha is provided, set it to 0.6
     kwargs.setdefault("alpha", 0.6)
+    if original_space:
+        if fold is None:
+            shap_values = (
+                np.concatenate(
+                    [
+                        results.get_shap_values_orig_space(fold, "all")[
+                            feature
+                        ].to_numpy()
+                        for fold in range(results.num_folds)
+                    ],
+                    dtype=np.float64,
+                )
+            ) * 100
 
-    if fold is None:
-        indices = np.arange(results.X.shape[0])
-        shap_values = (
-            np.concatenate(
+            feature_values = np.concatenate(
                 [
-                    results.shap_values[fold][:, feature].values
+                    results.shap_values[fold][:, feature].data
                     for fold in range(results.num_folds)
                 ],
                 dtype=np.float64,
             )
-        ) * 100
-        feature_values = np.concatenate(
-            [
-                results.shap_values[fold][:, feature].data
-                for fold in range(results.num_folds)
-            ],
-            dtype=np.float64,
-        )
+            indices = np.concatenate(
+                [results.get_indices(fold, "all") for fold in range(results.num_folds)],
+                dtype=np.int64,
+            )
+        else:
+            shap_struct = results.get_shap_values_orig_space(fold, "all")[
+                feature
+            ].to_numpy()
+            assert shap_struct is not None, (
+                f"Feature '{feature}' not found in SHAP values for fold {fold}"
+            )
+
+            indices = results.get_indices(fold, "all")
+            shap_values = (cast(np.ndarray, shap_struct).astype(np.float64)) * 100
+
+            feature_values = cast(
+                np.ndarray, results.shap_values[fold][:, feature].data
+            ).astype(np.float64)
+
     else:
-        shap_struct = results.shap_values[fold][:, feature]
-        assert shap_struct is not None, (
-            f"Feature '{feature}' not found in SHAP values for fold {fold}"
-        )
+        if fold is None:
+            indices = np.arange(results.X.shape[0])
+            shap_values = (
+                np.concatenate(
+                    [
+                        results.shap_values[fold][:, feature].values
+                        for fold in range(results.num_folds)
+                    ],
+                    dtype=np.float64,
+                )
+            ) * 100
+            feature_values = np.concatenate(
+                [
+                    results.shap_values[fold][:, feature].data
+                    for fold in range(results.num_folds)
+                ],
+                dtype=np.float64,
+            )
+        else:
+            shap_struct = results.shap_values[fold][:, feature]
+            assert shap_struct is not None, (
+                f"Feature '{feature}' not found in SHAP values for fold {fold}"
+            )
 
-        indices = results.get_indices(fold, "all")
+            indices = results.get_indices(fold, "all")
 
-        shap_values = (cast(np.ndarray, shap_struct.values).astype(np.float64)) * 100
-        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
+            shap_values = (
+                cast(np.ndarray, shap_struct.values).astype(np.float64)
+            ) * 100
+            feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
