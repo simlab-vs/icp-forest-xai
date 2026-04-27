@@ -124,6 +124,34 @@ def r2_score(
     )
 
 
+def nan_impute(X: pl.DataFrame, group_col: pl.Series) -> pl.DataFrame:
+    """
+    Impute NaN values in the features by using the median value of the feature.
+
+    Median values are calculated within each plot defined by plot_id.
+    If the median value for a plot is NaN, it falls back to the overall median of the feature.
+    Parameters
+    ----------
+        X (pl.DataFrame): DataFrame containing the features with potential NaN values to be imputed.
+        group_col (pl.Series): Series containing the group column for imputation.
+
+    Returns
+    -------
+        pl.DataFrame: DataFrame with NaN values imputed.
+    """
+
+    tdf = X.with_columns(group_col.alias("__group__"))
+    for col in X.columns:
+        tdf = tdf.with_columns(
+            pl.col(col).fill_null(
+                pl.col(col).median().over(pl.col("__group__"))
+                # .fill_null(pl.col(col).median())
+            )
+        )
+
+    return tdf.drop("__group__")
+
+
 class EstimatorProtocol(Protocol):
     """Protocol for a regressor that can be used in cross-validation."""
 
@@ -720,7 +748,8 @@ def train_and_explain(
             )
 
             # Input NaNs are not allowed in LassoCV, so we need to impute them
-            X = X.fill_null(0)
+            X = nan_impute(X, df.select("plot_id").to_series())
+            X = X.fill_null(0.0)  # Fill any remaining NaNs with 0.0 (if any)
 
             # Standardize the features
             X = pl.DataFrame(
@@ -834,4 +863,17 @@ def train_and_explain(
         ],
         shap_values=shap_values,
         dist_params=dist_params,
+    )
+
+
+if __name__ == "__main__":
+    # Example usage
+    results = train_and_explain(
+        species="spruce",
+        model_type="gbdt",
+        ablation="all",
+        group_by="plot_id",
+        cv=5,
+        n_jobs=-1,
+        use_temporal_cv=True,
     )
