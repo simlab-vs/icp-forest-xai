@@ -240,6 +240,7 @@ class LGBMEstimator(EstimatorProtocol):
         y: VectorLike,
         groups: VectorLike | None = None,
         ablation: Ablation = "all",
+        use_temporal_cv: bool = False,
         use_caching: bool = True,
     ) -> tuple[dict[str, Any], float]:
         """Optimize hyperparameters for a given species.
@@ -253,7 +254,11 @@ class LGBMEstimator(EstimatorProtocol):
         -------
         A tuple containing the best hyperparameters and the best value found.
         """
-        study_name = f"./cache/study-{self.species}-{self.group_by}-{ablation}.pkl"
+        if use_temporal_cv:
+            temporal_label = "with_temp_blocking"
+        else:
+            temporal_label = "without_temp_blocking"
+        study_name = f"./cache/study-{self.species}-{self.group_by}-{ablation}-{temporal_label}.pkl"
 
         # Check if the study has been cached
         if use_caching and os.path.exists(study_name):
