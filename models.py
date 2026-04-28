@@ -29,7 +29,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, Sequence, cast, overload
 
 from data import prepare_data, load_data
+from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
+
 import warnings
+
 
 warnings.filterwarnings(
     "ignore",
@@ -42,6 +45,7 @@ Split = Literal["train", "test", "all"]
 ModelType = Literal["gbdt", "lasso"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
+TemporalGroups = tuple[np.ndarray, np.ndarray, np.ndarray]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,6 +129,34 @@ def r2_score(
     )
 
 
+def nan_impute(X: pl.DataFrame, group_col: pl.Series) -> pl.DataFrame:
+    """
+    Impute NaN values in the features by using the median value of the feature.
+
+    Median values are calculated within each plot defined by plot_id.
+
+    Parameters
+    ----------
+        X (pl.DataFrame): DataFrame containing the features with potential NaN values to be imputed.
+        group_col (pl.Series): Series containing the group column for imputation.
+
+    Returns
+    -------
+        pl.DataFrame: DataFrame with NaN values imputed.
+    """
+
+    tdf = X.with_columns(group_col.alias("__group__"))
+    for col in X.columns:
+        tdf = tdf.with_columns(
+            pl.col(col).fill_null(
+                pl.col(col).median().over(pl.col("__group__"))
+                # .fill_null(pl.col(col).median())
+            )
+        )
+
+    return tdf.drop("__group__")
+
+
 class EstimatorProtocol(Protocol):
     """Protocol for a regressor that can be used in cross-validation."""
 
@@ -182,6 +214,7 @@ class LGBMEstimator(EstimatorProtocol):
         species: Species,
         group_by: str | None,
         cv: int = 5,
+        use_temporal_cv: bool = False,
         n_jobs: int = -1,
         random_state: int | None = RANDOM_STATE,
         verbosity: int = -1,
@@ -201,7 +234,7 @@ class LGBMEstimator(EstimatorProtocol):
         self.cv = cv
         self.n_jobs = n_jobs
         self.random_state = random_state
-
+        self.use_temporal_cv = use_temporal_cv
         self.num_iter = 100
         self.verbosity = verbosity
 
@@ -238,7 +271,7 @@ class LGBMEstimator(EstimatorProtocol):
         self,
         X: MatrixLike,
         y: VectorLike,
-        groups: VectorLike | None = None,
+        groups: VectorLike | TemporalGroups | None = None,
         ablation: Ablation = "all",
         use_temporal_cv: bool = False,
         use_caching: bool = True,
@@ -326,15 +359,28 @@ class LGBMEstimator(EstimatorProtocol):
                 random_state=self.random_state,
             )
 
+            if self.use_temporal_cv:
+                cv = HierarchicalTimeGroupCV(
+                    n_splits_tree=self.cv,
+                    log_level=logging.ERROR,
+                )
+                groups_to_pass = groups
+            else:
+                if self.group_by is None:
+                    cv = KFold(
+                        n_splits=self.cv, shuffle=True, random_state=self.random_state
+                    )
+                else:
+                    cv = GroupKFold(n_splits=self.cv)
+                groups_to_pass = to_numpy(cast(VectorLike | None, groups))
+
             results = cross_validate(
-                estimator=estimator,
+                estimator=estimator,  # type: ignore[arg-type]
                 X=to_numpy(X),
                 y=to_numpy(y),
-                groups=to_numpy(groups),
+                groups=groups_to_pass,
                 scoring=make_scorer(r2_score),
-                cv=KFold(n_splits=self.cv)
-                if self.group_by is None
-                else GroupKFold(n_splits=self.cv),
+                cv=cv,
                 n_jobs=self.n_jobs,
             )
 
@@ -364,14 +410,18 @@ class LGBMEstimator(EstimatorProtocol):
         groups = kwargs.get("groups", None)
         ablation = kwargs.get("ablation", "all")
 
-        if self.group_by is not None and groups is None:
+        if not self.use_temporal_cv and self.group_by is not None and groups is None:
             raise ValueError(
                 "Group information is required for cross-validation with group_by."
             )
 
         # Optimize hyperparameters if not already done
         best_params, _ = self.optimize_hyperparameters(
-            X, y, ablation=ablation, groups=groups, use_caching=True
+            X,
+            y,
+            ablation=ablation,
+            groups=groups,
+            use_caching=True,
         )
 
         self._lgbm.set_params(**best_params)
@@ -403,6 +453,8 @@ class LassoEstimator(EstimatorProtocol):
         self,
         *,
         species: Species,
+        use_temporal_cv: bool = False,
+        ablation: Ablation = "all",
         group_by: str | None = None,
         cv: int = 5,
         **kwargs: Any,
@@ -411,8 +463,9 @@ class LassoEstimator(EstimatorProtocol):
         self.species = species
         self.group_by = group_by
         self.cv = cv
+        self.use_temporal_cv = use_temporal_cv
+        self.ablation = ablation
         self.lasso_kwargs = kwargs.copy()
-
         self._model = None
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
@@ -435,11 +488,23 @@ class LassoEstimator(EstimatorProtocol):
         # Extract groups if provided
         groups = kwargs.get("groups", None)
 
+        if self.use_temporal_cv:
+            cv = HierarchicalTimeGroupCV(
+                n_splits_tree=self.cv,
+                log_level=logging.ERROR,
+            )
+        else:
+            if self.group_by is None:
+                cv = KFold(
+                    n_splits=self.cv,
+                    shuffle=True,
+                )
+            else:
+                cv = GroupKFold(n_splits=self.cv)
+
         # Use LassoCV for cross-validating the optimal alpha
         lasso_cv = LassoCV(
-            cv=GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv),
+            cv=cv,
             verbose=False,
             **self.lasso_kwargs,
         )
@@ -727,6 +792,38 @@ class CrossValidationResults:
     )
 
 
+def add_period_indices(df):
+    """
+    Add period indices to the dataframe based on temporal ordering within each plot.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input polars DataFrame containing plot_id, period_start, and period_end columns.
+
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with added 'period_idx' column.
+    """
+
+    dfs = []
+    for plot_id in df["plot_id"].unique():
+        plot_df = df.filter(pl.col("plot_id") == plot_id)
+        intervals = (
+            plot_df.group_by(["period_start", "period_end"])
+            .agg(pl.len().alias("tree_count"))
+            .sort(["period_start"])
+            .with_columns(pl.int_range(1, pl.len() + 1).alias("period_idx"))
+        )
+        plot_df = plot_df.join(intervals, on=["period_start", "period_end"])
+        dfs.append(plot_df)
+
+    result_df = pl.concat(dfs)
+
+    return result_df
+
+
 def train_and_explain(
     species: Species,
     *,
@@ -761,24 +858,31 @@ def train_and_explain(
     # Load data for the given species
     df = load_data(species)
 
+    if use_temporal_cv:
+        df = add_period_indices(df)
+        tree_groups = df.select("tree_id").to_series().to_numpy()
+        period_groups = df.select("period_idx").to_series().to_numpy()
+        plot_groups = df.select("plot_id").to_series().to_numpy()
+        temporal_groups = (tree_groups, period_groups, plot_groups)
+    else:
+        temporal_groups = None
+
     # Prepare data
     X, y, dist_params = prepare_data(df, ablation)
     shape, loc, scale = dist_params
 
     # Prepare groups
-    if group_by is not None:
+    if not use_temporal_cv and group_by is not None:
         groups = df.select(group_by).to_series()
     else:
         groups = None
 
     # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
     if use_temporal_cv:
-        from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
-
         temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
-            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+            temporal_cv.split(to_numpy(X), y, groups=temporal_groups)
         ):
             splits.append((train_idx, test_idx))
     else:
@@ -803,6 +907,7 @@ def train_and_explain(
                 species=species,
                 group_by=group_by,
                 cv=cv,
+                use_temporal_cv=use_temporal_cv,
                 n_jobs=n_jobs,
             )
         elif model_type == "lasso":
@@ -818,7 +923,8 @@ def train_and_explain(
             )
 
             # Input NaNs are not allowed in LassoCV, so we need to impute them
-            X = X.fill_null(0)
+            X = nan_impute(X, df.select("plot_id").to_series())
+            X = X.fill_null(0.0)  # Fill any remaining NaNs with 0.0
 
             # Standardize the features
             X = pl.DataFrame(
@@ -836,11 +942,18 @@ def train_and_explain(
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
+        fold_groups = to_numpy(groups[train_idx]) if groups is not None else None
+        if use_temporal_cv and temporal_groups is not None:
+            fold_groups = (
+                temporal_groups[0][train_idx],
+                temporal_groups[1][train_idx],
+                temporal_groups[2][train_idx],
+            )
         # Fit the model
         estimator.fit(
             X_train,
             y_train,
-            groups=to_numpy(groups[train_idx]) if groups is not None else None,
+            groups=fold_groups,
             ablation=ablation,
         )
 
@@ -878,7 +991,6 @@ def train_and_explain(
     explainers = []
     shap_values = []
     shap_row_indices = []
-
     X_background = X.sample(1000, with_replacement=False)
 
     for fold, estimator in enumerate(results.estimator):
@@ -887,7 +999,6 @@ def train_and_explain(
         # Since some data will be lost use temporal blocking
         used_idx = np.concatenate([train_idx, test_idx])
         X_used = X[used_idx]
-
         # Create a SHAP explainer for the LGBM model
         if isinstance(estimator, LGBMEstimator):
             explainer = TreeExplainer(
