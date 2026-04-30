@@ -765,6 +765,11 @@ def train_and_explain(
     X, y, dist_params = prepare_data(df, ablation)
     shape, loc, scale = dist_params
 
+    if group_by == "plot_id":
+        use_temporal_cv = (
+            False  # Temporal CV is not compatible with plot-level grouping
+        )
+
     # Prepare groups
     if group_by is not None:
         groups = df.select(group_by).to_series()
