@@ -8,7 +8,6 @@ import polars as pl
 from itertools import combinations
 from sklearn.model_selection import BaseCrossValidator, GroupKFold
 from data import prepare_data, load_data
-from models import to_numpy
 
 import logging
 
@@ -214,7 +213,7 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
 
         # For each tree fold
         for fold, (train_tree_idx, test_tree_idx) in enumerate(
-            gkf.split(X, y, groups=to_numpy(tree_groups))
+            gkf.split(X, y, groups=tree_groups)
         ):
             train_idxs, test_idxs = [], []
 
@@ -296,17 +295,44 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
         # Perform temporal splits
         for fold, (train_idx, test_idx) in enumerate(
             self.temporal_split(
-                to_numpy(X),
+                X,
                 y,
-                tree_groups=to_numpy(tree_groups),
-                period_group=to_numpy(period_groups),
-                plot_group=to_numpy(plot_groups),
+                tree_groups=tree_groups,
+                period_group=period_groups,
+                plot_group=plot_groups,
             )
         ):
             self.logger.info(
                 f"Fold {fold} - Train periods: {len(train_idx)}, Test periods: {len(test_idx)}"
             )
             yield train_idx, test_idx
+
+    def split(self, X, y=None, groups=None):
+        """Generate indices to split data into training and test set.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples and
+            n_features is the number of features.
+        y : array-like of shape (n_samples,), default=None
+            Target values.
+        groups : array-like of shape (n_samples,), default=None
+            Group labels for the samples
+
+        Returns
+        -------
+        Tuple[List[int], List[int]]
+        """
+        tree_groups, period_groups, plot_groups = None, None, None
+
+        if isinstance(groups, tuple) and len(groups) == 3:
+            tree_groups, period_groups, plot_groups = groups
+
+        for train_idx, test_idx in self.temporal_split(
+            X, y, tree_groups, period_groups, plot_groups
+        ):
+            yield np.array(train_idx), np.array(test_idx)
 
 
 if __name__ == "__main__":

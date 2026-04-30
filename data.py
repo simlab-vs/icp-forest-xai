@@ -96,7 +96,7 @@ def load_data(species: Species) -> pl.DataFrame:
 
 def prepare_data(
     df: pl.DataFrame, ablation: Ablation = "all", plotting: bool = False
-) -> tuple[pl.DataFrame, pl.Series, tuple[float, float, float]]:
+) -> tuple[pl.DataFrame, pl.Series, tuple[float | None, float | None, float | None]]:
     """Prepare the data for training.
 
     We normalize the target variable by fitting a log-normal distribution to it and
@@ -133,8 +133,7 @@ def prepare_data(
 
     # Apply a log-normal transformation to the target if it is growth rate
     if TARGET != "growth_rate_rel":
-        shape, loc, scale = 0.0, 0.0, 0.0
-        return X, y, (shape, loc, scale)
+        return X, y, (None, None, None)
 
     y_plus_one = y + 1.0
     shape, loc, scale = lognorm.fit(y_plus_one)

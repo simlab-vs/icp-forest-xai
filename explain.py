@@ -25,6 +25,8 @@ def plot_dependence(
     fold: int | None = None,
     label: str | None = None,
     show_no_effect: bool = True,
+    use_original_space: bool = False,
+    use_percentage: bool = True,
     fit_func: Callable | None = None,
     fit_p0: tuple[float, float, float] | None = None,
     fit_formula: str | None = None,
@@ -78,37 +80,81 @@ def plot_dependence(
     # If no alpha is provided, set it to 0.6
     kwargs.setdefault("alpha", 0.6)
 
-    if fold is None:
-        indices = np.arange(results.X.shape[0])
-        shap_values = (
-            np.concatenate(
+    y_label = "SHAP value"
+    if use_original_space:
+        y_label = y_label + " (original space)"
+    if use_percentage:
+        y_label = y_label + " [%]"
+
+    if use_original_space:
+        if fold is None:
+            shap_values = np.concatenate(
+                [
+                    results.get_shap_values_orig_space(fold, "all")[feature].to_numpy()
+                    for fold in range(results.num_folds)
+                ],
+                dtype=np.float64,
+            )
+
+            feature_values = np.concatenate(
+                [
+                    results.shap_values[fold][:, feature].data
+                    for fold in range(results.num_folds)
+                ],
+                dtype=np.float64,
+            )
+            indices = np.concatenate(
+                [results.get_indices(fold, "all") for fold in range(results.num_folds)],
+                dtype=np.int64,
+            )
+        else:
+            shap_struct = results.get_shap_values_orig_space(fold, "all")[
+                feature
+            ].to_numpy()
+            assert shap_struct is not None, (
+                f"Feature '{feature}' not found in SHAP values for fold {fold}"
+            )
+
+            indices = results.get_indices(fold, "all")
+            shap_values = cast(np.ndarray, shap_struct).astype(np.float64)
+
+            feature_values = cast(
+                np.ndarray, results.shap_values[fold][:, feature].data
+            ).astype(np.float64)
+
+    else:
+        if fold is None:
+            indices = np.arange(results.X.shape[0])
+            shap_values = np.concatenate(
                 [
                     results.shap_values[fold][:, feature].values
                     for fold in range(results.num_folds)
                 ],
                 dtype=np.float64,
             )
-        ) * 100
-        feature_values = np.concatenate(
-            [
-                results.shap_values[fold][:, feature].data
-                for fold in range(results.num_folds)
-            ],
-            dtype=np.float64,
-        )
-    else:
-        shap_struct = results.shap_values[fold][:, feature]
-        assert shap_struct is not None, (
-            f"Feature '{feature}' not found in SHAP values for fold {fold}"
-        )
+            feature_values = np.concatenate(
+                [
+                    results.shap_values[fold][:, feature].data
+                    for fold in range(results.num_folds)
+                ],
+                dtype=np.float64,
+            )
+        else:
+            shap_struct = results.shap_values[fold][:, feature]
+            assert shap_struct is not None, (
+                f"Feature '{feature}' not found in SHAP values for fold {fold}"
+            )
 
-        indices = results.get_indices(fold, "all")
+            indices = results.get_indices(fold, "all")
 
-        shap_values = (cast(np.ndarray, shap_struct.values).astype(np.float64)) * 100
-        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
+            shap_values = cast(np.ndarray, shap_struct.values).astype(np.float64)
+            feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
+
+    if use_percentage:
+        shap_values = shap_values * 100
 
     # Define x and y limits if not provided
     if xlim is None:
@@ -137,6 +183,7 @@ def plot_dependence(
     xwidth = xlim[1] - xlim[0]
     ywidth = ylim[1] - ylim[0]
 
+    # Convert to percentage for better interpretability
     if plot_type == PlotType.LINE:
         sns.lineplot(
             x=feature_values[valid_indices],
@@ -249,7 +296,7 @@ def plot_dependence(
 
     ax.set_title(results.species.capitalize())
     ax.set_xlabel(feature)
-    ax.set_ylabel("SHAP value [%]")
+    ax.set_ylabel(y_label)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 
