@@ -5,7 +5,7 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import LassoCV, Lasso
+from sklearn.linear_model import LassoCV, Lasso, RidgeCV, Ridge
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
@@ -39,7 +39,7 @@ warnings.filterwarnings(
 )
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["gbdt", "lasso"]
+ModelType = Literal["gbdt", "lasso", "ridge"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -464,6 +464,73 @@ class LassoEstimator(EstimatorProtocol):
         return self._model
 
 
+class RidgeEstimator(EstimatorProtocol):
+    """Ridge regressor."""
+
+    def __init__(
+        self,
+        *,
+        species: Species,
+        group_by: str | None = None,
+        cv: int = 5,
+        **kwargs: Any,
+    ):
+        """Initialize the RidgeCV regressor."""
+        self.species = species
+        self.group_by = group_by
+        self.cv = cv
+        self.ridge_kwargs = kwargs.copy()
+
+        self._model = None
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Get the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.get_params(deep=deep)
+
+    def set_params(self, **params: Any) -> RidgeEstimator:
+        """Set the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        self._model.set_params(**params)
+        return self
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> RidgeEstimator:
+        """Fit the regressor to the training data."""
+        # Extract groups if provided
+        groups = kwargs.get("groups", None)
+
+        # Use RidgeCV for cross-validating the optimal alpha
+        ridge_cv = RidgeCV(
+            cv=GroupKFold(n_splits=self.cv)
+            if self.group_by is not None
+            else KFold(n_splits=self.cv),
+            **self.ridge_kwargs,
+        )
+
+        ridge_cv.fit(X, y, groups=to_numpy(groups))
+        self._model = Ridge(alpha=ridge_cv.alpha_).fit(X, y)
+
+        return self
+
+    def predict(self, X: MatrixLike) -> VectorLike:
+        """Predict using the fitted regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.predict(X)
+
+    def get_sklearn(self) -> Ridge:
+        """Get the underlying Ridge regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model
+
+
 @dataclass
 class ExperimentResults:
     """Results of an experiment.
@@ -830,9 +897,28 @@ def train_and_explain(
                 sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
                 schema=X.schema,
             )
+
+        elif model_type == "ridge":
+            # Enable metadata routing for RidgeCV to handle group information
+            sklearn.set_config(enable_metadata_routing=True)
+
+            estimator = RidgeEstimator(
+                species=species,
+                group_by=group_by,
+                cv=cv,
+            )
+
+            # Input NaNs are not allowed in RidgeCV, so we need to impute them
+            X = X.fill_null(0)
+
+            # Standardize the features
+            X = pl.DataFrame(
+                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
+                schema=X.schema,
+            )
         else:
             raise ValueError(
-                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm' and 'lasso'."
+                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm', 'lasso', and 'ridge'."
             )
 
         print(f"Fold {fold + 1}/{cv}")
@@ -900,7 +986,7 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, LassoEstimator):
+        elif isinstance(estimator, LassoEstimator | RidgeEstimator):
             explainer = LinearExplainer(
                 estimator.get_sklearn(),
                 feature_names=X.columns,
@@ -946,4 +1032,14 @@ def train_and_explain(
         shap_values=shap_values,
         dist_params=dist_params,
         shap_row_indices=shap_row_indices,
+    )
+
+
+if __name__ == "__main__":
+    train_and_explain(
+        species="spruce",
+        model_type="ridge",
+        ablation="all",
+        group_by="tree_id",
+        use_temporal_cv=True,
     )
