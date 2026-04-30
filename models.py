@@ -847,7 +847,9 @@ def train_and_explain(
     if use_temporal_cv:
         from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
 
-        temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
+        temporal_cv = HierarchicalTimeGroupCV(
+            log_level=logging.ERROR, random_state=RANDOM_STATE
+        )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
             temporal_cv.run_cross_validation(species=species, ablation=ablation)

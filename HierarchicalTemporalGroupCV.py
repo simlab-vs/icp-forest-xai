@@ -32,7 +32,7 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
         Logging level for the cross-validator. Set to logging.WARNING to suppress messages.
     """
 
-    def __init__(self, n_splits_tree=5, log_level=logging.INFO):
+    def __init__(self, n_splits_tree=5, log_level=logging.INFO, random_state=None):
         """
         Initialize the HierarchicalTimeGroupCV cross-validator.
 
@@ -46,6 +46,8 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
         self.n_splits_tree = n_splits_tree
         self.logger = logging.getLogger(f"{__name__}.HierarchicalTimeGroupCV")
         self.logger.setLevel(log_level)
+        self.random_state = random_state
+        self._rng = random.Random(random_state)
 
     def get_n_splits(self, X=None, y=None, groups=None):
         """
@@ -230,7 +232,7 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
                     self.generate_period_splits(periods, math.ceil(len(periods) / 2))
                 )
 
-                train_periods, test_periods = random.choice(plot_splits)
+                train_periods, test_periods = self._rng.choice(plot_splits)
 
                 train_mask = (
                     plot_mask
