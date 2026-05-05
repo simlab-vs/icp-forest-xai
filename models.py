@@ -848,7 +848,7 @@ def train_and_explain(
         from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
 
         temporal_cv = HierarchicalTimeGroupCV(
-            log_level=logging.ERROR, random_state=RANDOM_STATE
+            log_level=logging.ERROR,
         )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(

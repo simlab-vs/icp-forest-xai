@@ -11,6 +11,9 @@ wheels/
 # Data
 data
 
+# Figures
+figures
+
 # Temporary directories
 .cache
 
