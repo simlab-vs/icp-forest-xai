@@ -5,7 +5,7 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import ElasticNet
+from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
@@ -419,24 +419,13 @@ class LGBMEstimator(EstimatorProtocol):
         return self._lgbm
 
 
-def _alpha_max(X: np.ndarray, y: np.ndarray) -> float:
-    """Smallest alpha that drives all ElasticNet coefficients to zero (l1_ratio=1)."""
-    return float(np.abs((y - y.mean()) @ X).max()) / len(y)
-
-
 def _solve_elasticnet(
     X: np.ndarray,
     y: np.ndarray,
     alpha: float,
     l1_ratio: float,
-    *,
-    fast: bool = False,
 ) -> tuple[np.ndarray, float]:
-    """Solve ElasticNet via CVXPY.
-
-    fast=True uses SCS (ADMM, ~10x faster, suitable for CV grid search).
-    fast=False uses CLARABEL (interior-point, high precision, for final fit).
-    """
+    """Solve ElasticNet via CVXPY/CLARABEL (interior-point, guaranteed convergence)."""
     import cvxpy as cp
 
     n, p = X.shape
@@ -448,52 +437,12 @@ def _solve_elasticnet(
         1 - l1_ratio
     ) * cp.sum_squares(beta)
     prob = cp.Problem(cp.Minimize(loss + reg))
-
-    if fast:
-        prob.solve(solver=cp.SCS, eps=1e-5, max_iters=100_000, verbose=False)
-    else:
-        prob.solve(solver=cp.CLARABEL, verbose=False)
+    prob.solve(solver=cp.CLARABEL, verbose=False)
 
     if beta.value is None or b0.value is None:
         raise RuntimeError(f"CVXPY solver failed: status={prob.status}")
 
     return beta.value, float(b0.value.item())
-
-
-def _cv_select_elasticnet_params(
-    X: np.ndarray,
-    y: np.ndarray,
-    l1_ratios: list[float],
-    n_alphas: int,
-    eps: float,
-    splits: list[tuple[np.ndarray, np.ndarray]],
-) -> tuple[float, float]:
-    """Grid-search (alpha, l1_ratio) via CV using fast CVXPY/SCS solves."""
-    # Upper bound generous enough for all l1_ratios (alpha_max scales with 1/l1_ratio)
-    amax = _alpha_max(X, y) / min(l1_ratios)
-    alpha_grid = np.geomspace(amax, amax * eps, n_alphas)
-
-    best_mse = np.inf
-    best_alpha = alpha_grid[n_alphas // 2]
-    best_l1 = l1_ratios[-1]
-
-    for l1_ratio in l1_ratios:
-        for alpha in alpha_grid:
-            fold_mses: list[float] = []
-            for train_idx, val_idx in splits:
-                try:
-                    coef, intercept = _solve_elasticnet(
-                        X[train_idx], y[train_idx], alpha, l1_ratio, fast=True
-                    )
-                    pred = X[val_idx] @ coef + intercept
-                    fold_mses.append(float(np.mean((y[val_idx] - pred) ** 2)))
-                except Exception:
-                    fold_mses.append(np.inf)
-            mean_mse = float(np.mean(fold_mses))
-            if mean_mse < best_mse:
-                best_mse, best_alpha, best_l1 = mean_mse, alpha, l1_ratio
-
-    return best_alpha, best_l1
 
 
 class LassoEstimator(EstimatorProtocol):
@@ -562,30 +511,25 @@ class LassoEstimator(EstimatorProtocol):
                     dropped,
                 )
 
-        # Build the same CV splits used by the outer loop
+        # ElasticNetCV: warm-started path algorithm selects alpha and l1_ratio
         groups_arr = to_numpy(groups)
-        splitter = (
-            GroupKFold(n_splits=self.cv)
+        en_cv = ElasticNetCV(
+            l1_ratio=[0.7, 0.9, 0.99],
+            n_alphas=100,
+            cv=GroupKFold(n_splits=self.cv)
             if self.group_by is not None
-            else KFold(n_splits=self.cv)
+            else KFold(n_splits=self.cv),
+            max_iter=100_000,
+            verbose=False,
         )
-        splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
-
-        # Grid-search (alpha, l1_ratio) via fast SCS solves
-        alpha, l1_ratio = _cv_select_elasticnet_params(
-            X_proc,
-            y_arr,
-            l1_ratios=[0.7, 0.9, 0.99],
-            n_alphas=10,
-            eps=1e-2,
-            splits=splits,
-        )
+        en_cv.fit(X_proc, y_arr, groups=groups_arr)
+        alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
         logging.info(
             "[%s] CV selected alpha=%.6f, l1_ratio=%.2f", self.species, alpha, l1_ratio
         )
 
-        # Final high-precision fit via CLARABEL
-        coef, intercept = _solve_elasticnet(X_proc, y_arr, alpha, l1_ratio, fast=False)
+        # Final fit via CVXPY/CLARABEL: interior-point solver, guaranteed convergence
+        coef, intercept = _solve_elasticnet(X_proc, y_arr, alpha, l1_ratio)
 
         # Store as ElasticNet so get_sklearn() / LinearExplainer stay compatible
         en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
