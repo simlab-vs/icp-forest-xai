@@ -419,6 +419,27 @@ class LGBMEstimator(EstimatorProtocol):
         return self._lgbm
 
 
+class MissingnessFilter:
+    """Drop columns whose missing rate in the training data exceeds `threshold`."""
+
+    def __init__(self, threshold: float = 0.5) -> None:
+        self.threshold = threshold
+        self.mask_: np.ndarray = np.array([], dtype=bool)
+
+    def fit(self, X: np.ndarray, y: Any = None) -> MissingnessFilter:
+        self.mask_ = np.isnan(X).mean(axis=0) <= self.threshold
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return X[:, self.mask_]
+
+    def fit_transform(self, X: np.ndarray, y: Any = None) -> np.ndarray:
+        return self.fit(X).transform(X)
+
+    def get_support(self) -> np.ndarray:
+        return self.mask_
+
+
 def _solve_elasticnet(
     X: np.ndarray,
     y: np.ndarray,
@@ -462,9 +483,12 @@ class LassoEstimator(EstimatorProtocol):
         self.cv = cv
         self.lasso_kwargs = kwargs.copy()
 
+        self._miss_filter: MissingnessFilter | None = None
         self._preprocessor = None
         self._model = None
-        self._var_mask: np.ndarray | None = None  # bool mask of kept features
+        self._var_mask: np.ndarray | None = (
+            None  # bool mask into original feature space
+        )
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -505,7 +529,25 @@ class LassoEstimator(EstimatorProtocol):
                     ", ".join(f"{f}={r:.0%}" for f, r in high_miss),
                 )
 
-        # Preprocessing: impute → drop near-zero variance → standardise
+        # Step 1: drop features with >50% missing *before* imputation.
+        # VarianceThreshold alone won't catch these: a feature that is 80% missing
+        # still has real variance in the observed 20%, survives the threshold, then
+        # gets imputed to a training-fold constant — causing test-time distribution
+        # shift when the temporal test fold has different missingness patterns.
+        self._miss_filter = MissingnessFilter(threshold=0.5)
+        X_np_filtered = self._miss_filter.fit_transform(X_np)
+        miss_mask = self._miss_filter.get_support()
+        if feature_names is not None:
+            dropped_miss = [f for f, keep in zip(feature_names, miss_mask) if not keep]
+            if dropped_miss:
+                logging.info(
+                    "[%s] Dropped %d high-missingness feature(s) (>50%%): %s",
+                    tag,
+                    len(dropped_miss),
+                    dropped_miss,
+                )
+
+        # Step 2: impute → drop near-zero variance → standardise on the filtered matrix
         self._preprocessor = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="mean")),
@@ -514,19 +556,25 @@ class LassoEstimator(EstimatorProtocol):
             ]
         )
 
-        self._preprocessor.fit(X_np)
-        X_proc = self._preprocessor.transform(X_np).astype(float)
+        self._preprocessor.fit(X_np_filtered)
+        X_proc = self._preprocessor.transform(X_np_filtered).astype(float)
 
-        # Report dropped features and persist mask for SHAP padding
-        self._var_mask = self._preprocessor.named_steps["var_threshold"].get_support()
+        # Combine both masks so _var_mask indexes into the *original* feature space
+        var_mask_partial = self._preprocessor.named_steps["var_threshold"].get_support()
+        full_mask = np.zeros(X_np.shape[1], dtype=bool)
+        full_mask[miss_mask] = var_mask_partial
+        self._var_mask = full_mask
         if feature_names is not None:
-            dropped = [f for f, keep in zip(feature_names, self._var_mask) if not keep]
-            if dropped:
+            kept_after_miss = [f for f, keep in zip(feature_names, miss_mask) if keep]
+            dropped_var = [
+                f for f, keep in zip(kept_after_miss, var_mask_partial) if not keep
+            ]
+            if dropped_var:
                 logging.info(
                     "[%s] Dropped %d near-zero variance feature(s): %s",
                     tag,
-                    len(dropped),
-                    dropped,
+                    len(dropped_var),
+                    dropped_var,
                 )
 
         cond = float(np.linalg.cond(X_proc))
@@ -599,18 +647,16 @@ class LassoEstimator(EstimatorProtocol):
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        if self._model is None or self._preprocessor is None:
+        if self._model is None:
             raise ValueError("Model has not been fitted yet.")
-
-        return self._model.predict(
-            self._preprocessor.transform(to_numpy(X).astype(float))
-        )
+        return self._model.predict(self.transform(X))
 
     def transform(self, X: MatrixLike) -> np.ndarray:
-        """Apply the preprocessing pipeline (impute → variance filter → scale)."""
-        if self._preprocessor is None:
+        """Apply the full preprocessing stack (missingness filter → impute → variance filter → scale)."""
+        if self._preprocessor is None or self._miss_filter is None:
             raise ValueError("Model has not been fitted yet.")
-        return self._preprocessor.transform(to_numpy(X).astype(float))
+        X_np = to_numpy(X).astype(float)
+        return self._preprocessor.transform(self._miss_filter.transform(X_np))
 
     def get_sklearn(self) -> ElasticNet:
         """Get the underlying ElasticNet regressor."""
