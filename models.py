@@ -5,7 +5,7 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import ElasticNetCV, ElasticNet
+from sklearn.linear_model import LassoCV, ElasticNet
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
@@ -458,9 +458,8 @@ class LassoEstimator(EstimatorProtocol):
         # Extract groups if provided
         groups = kwargs.get("groups", None)
 
-        # ElasticNet with l1_ratio=0.99 adds a tiny L2 term for numerical stability
-        lasso_cv = ElasticNetCV(
-            l1_ratio=0.99,
+        # LassoCV selects alpha; final model adds tiny L2 (l1_ratio=0.99) for stability
+        lasso_cv = LassoCV(
             cv=GroupKFold(n_splits=self.cv)
             if self.group_by is not None
             else KFold(n_splits=self.cv),
