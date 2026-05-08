@@ -595,7 +595,7 @@ class LassoEstimator(EstimatorProtocol):
         cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
 
         en_cv = ElasticNetCV(
-            l1_ratio=[0.7, 0.9, 0.99],
+            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 0.99],
             n_alphas=100,
             cv=cv_splits,
             max_iter=100_000,
