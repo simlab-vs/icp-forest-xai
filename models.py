@@ -5,7 +5,8 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import ElasticNetCV, ElasticNet
+from sklearn.linear_model import ElasticNet
+from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
@@ -418,8 +419,85 @@ class LGBMEstimator(EstimatorProtocol):
         return self._lgbm
 
 
+def _alpha_max(X: np.ndarray, y: np.ndarray) -> float:
+    """Smallest alpha that drives all ElasticNet coefficients to zero (l1_ratio=1)."""
+    return float(np.abs((y - y.mean()) @ X).max()) / len(y)
+
+
+def _solve_elasticnet(
+    X: np.ndarray,
+    y: np.ndarray,
+    alpha: float,
+    l1_ratio: float,
+    *,
+    fast: bool = False,
+) -> tuple[np.ndarray, float]:
+    """Solve ElasticNet via CVXPY.
+
+    fast=True uses SCS (ADMM, ~10x faster, suitable for CV grid search).
+    fast=False uses CLARABEL (interior-point, high precision, for final fit).
+    """
+    import cvxpy as cp
+
+    n, p = X.shape
+    beta = cp.Variable(p)
+    b0 = cp.Variable()
+
+    loss = (1.0 / (2 * n)) * cp.sum_squares(y - X @ beta - b0)
+    reg = alpha * l1_ratio * cp.norm1(beta) + 0.5 * alpha * (
+        1 - l1_ratio
+    ) * cp.sum_squares(beta)
+    prob = cp.Problem(cp.Minimize(loss + reg))
+
+    if fast:
+        prob.solve(solver=cp.SCS, eps=1e-5, max_iters=100_000, verbose=False)
+    else:
+        prob.solve(solver=cp.CLARABEL, verbose=False)
+
+    if beta.value is None or b0.value is None:
+        raise RuntimeError(f"CVXPY solver failed: status={prob.status}")
+
+    return beta.value, float(b0.value.item())
+
+
+def _cv_select_elasticnet_params(
+    X: np.ndarray,
+    y: np.ndarray,
+    l1_ratios: list[float],
+    n_alphas: int,
+    eps: float,
+    splits: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, float]:
+    """Grid-search (alpha, l1_ratio) via CV using fast CVXPY/SCS solves."""
+    # Upper bound generous enough for all l1_ratios (alpha_max scales with 1/l1_ratio)
+    amax = _alpha_max(X, y) / min(l1_ratios)
+    alpha_grid = np.geomspace(amax, amax * eps, n_alphas)
+
+    best_mse = np.inf
+    best_alpha = alpha_grid[n_alphas // 2]
+    best_l1 = l1_ratios[-1]
+
+    for l1_ratio in l1_ratios:
+        for alpha in alpha_grid:
+            fold_mses: list[float] = []
+            for train_idx, val_idx in splits:
+                try:
+                    coef, intercept = _solve_elasticnet(
+                        X[train_idx], y[train_idx], alpha, l1_ratio, fast=True
+                    )
+                    pred = X[val_idx] @ coef + intercept
+                    fold_mses.append(float(np.mean((y[val_idx] - pred) ** 2)))
+                except Exception:
+                    fold_mses.append(np.inf)
+            mean_mse = float(np.mean(fold_mses))
+            if mean_mse < best_mse:
+                best_mse, best_alpha, best_l1 = mean_mse, alpha, l1_ratio
+
+    return best_alpha, best_l1
+
+
 class LassoEstimator(EstimatorProtocol):
-    """Lasso regressor."""
+    """ElasticNet regressor solved via CVXPY (CLARABEL/SCS)."""
 
     def __init__(
         self,
@@ -455,32 +533,66 @@ class LassoEstimator(EstimatorProtocol):
 
     def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LassoEstimator:
         """Fit the regressor to the training data."""
-        # Extract groups if provided
         groups = kwargs.get("groups", None)
+        feature_names = X.columns if isinstance(X, pl.DataFrame) else None
 
-        en_cv = ElasticNetCV(
-            l1_ratio=[0.5, 0.7, 0.9, 0.95, 0.99],
-            cv=GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv),
-            verbose=False,
-            **self.lasso_kwargs,
-        )
-
+        # Preprocessing: impute → drop near-zero variance → standardise
         self._preprocessor = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="mean")),
+                ("var_threshold", VarianceThreshold(threshold=1e-4)),
                 ("scaler", StandardScaler()),
             ]
         )
 
-        self._preprocessor.fit(X)
-        X_processed = self._preprocessor.transform(X)
+        X_np = to_numpy(X).astype(float)
+        self._preprocessor.fit(X_np)
+        X_proc = self._preprocessor.transform(X_np).astype(float)
+        y_arr = to_numpy(y).astype(float)
 
-        en_cv.fit(X_processed, y, groups=to_numpy(groups))
-        self._model = ElasticNet(alpha=en_cv.alpha_, l1_ratio=en_cv.l1_ratio_).fit(
-            X_processed, y
+        # Report dropped features
+        mask = self._preprocessor.named_steps["var_threshold"].get_support()
+        if feature_names is not None:
+            dropped = [f for f, keep in zip(feature_names, mask) if not keep]
+            if dropped:
+                logging.info(
+                    "[%s] Dropped %d near-zero variance feature(s): %s",
+                    self.species,
+                    len(dropped),
+                    dropped,
+                )
+
+        # Build the same CV splits used by the outer loop
+        groups_arr = to_numpy(groups)
+        splitter = (
+            GroupKFold(n_splits=self.cv)
+            if self.group_by is not None
+            else KFold(n_splits=self.cv)
         )
+        splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
+
+        # Grid-search (alpha, l1_ratio) via fast SCS solves
+        alpha, l1_ratio = _cv_select_elasticnet_params(
+            X_proc,
+            y_arr,
+            l1_ratios=[0.7, 0.9, 0.99],
+            n_alphas=10,
+            eps=1e-2,
+            splits=splits,
+        )
+        logging.info(
+            "[%s] CV selected alpha=%.6f, l1_ratio=%.2f", self.species, alpha, l1_ratio
+        )
+
+        # Final high-precision fit via CLARABEL
+        coef, intercept = _solve_elasticnet(X_proc, y_arr, alpha, l1_ratio, fast=False)
+
+        # Store as ElasticNet so get_sklearn() / LinearExplainer stay compatible
+        en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
+        en.coef_ = coef
+        en.intercept_ = intercept
+        setattr(en, "n_features_in_", X_proc.shape[1])
+        self._model = en
 
         return self
 
@@ -926,16 +1038,10 @@ def train_and_explain(
                 n_jobs=n_jobs,
             )
         elif model_type == "lasso":
-            # Enable metadata routing for LassoCV to handle group information
-            sklearn.set_config(enable_metadata_routing=True)
-
             estimator = LassoEstimator(
                 species=species,
                 group_by=group_by,
                 cv=cv,
-                n_jobs=n_jobs,
-                max_iter=25000,
-                tol=1e-6,
             )
 
         elif model_type == "ridge":
