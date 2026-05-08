@@ -464,6 +464,7 @@ class LassoEstimator(EstimatorProtocol):
 
         self._preprocessor = None
         self._model = None
+        self._var_mask: np.ndarray | None = None  # bool mask of kept features
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -499,10 +500,10 @@ class LassoEstimator(EstimatorProtocol):
         X_proc = self._preprocessor.transform(X_np).astype(float)
         y_arr = to_numpy(y).astype(float)
 
-        # Report dropped features
-        mask = self._preprocessor.named_steps["var_threshold"].get_support()
+        # Report dropped features and persist mask for SHAP padding
+        self._var_mask = self._preprocessor.named_steps["var_threshold"].get_support()
         if feature_names is not None:
-            dropped = [f for f, keep in zip(feature_names, mask) if not keep]
+            dropped = [f for f, keep in zip(feature_names, self._var_mask) if not keep]
             if dropped:
                 logging.info(
                     "[%s] Dropped %d near-zero variance feature(s): %s",
@@ -550,7 +551,15 @@ class LassoEstimator(EstimatorProtocol):
         if self._model is None or self._preprocessor is None:
             raise ValueError("Model has not been fitted yet.")
 
-        return self._model.predict(self._preprocessor.transform(X))
+        return self._model.predict(
+            self._preprocessor.transform(to_numpy(X).astype(float))
+        )
+
+    def transform(self, X: MatrixLike) -> np.ndarray:
+        """Apply the preprocessing pipeline (impute → variance filter → scale)."""
+        if self._preprocessor is None:
+            raise ValueError("Model has not been fitted yet.")
+        return self._preprocessor.transform(to_numpy(X).astype(float))
 
     def get_sklearn(self) -> ElasticNet:
         """Get the underlying ElasticNet regressor."""
@@ -1077,11 +1086,36 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, LassoEstimator | RidgeEstimator):
+        elif isinstance(estimator, LassoEstimator):
+            X_bg_proc = estimator.transform(X_background)
+            X_proc = estimator.transform(X)
+            mask = estimator._var_mask
+            feat_names_proc = (
+                [f for f, keep in zip(X.columns, mask) if keep]
+                if mask is not None
+                else X.columns
+            )
             explainer = LinearExplainer(
                 estimator.get_sklearn(),
-                feature_names=X.columns,
-                masker=IndependentMasker(to_numpy(X_background)),
+                feature_names=feat_names_proc,
+                masker=IndependentMasker(X_bg_proc),
+            )
+            raw = explainer(X_proc)
+            assert isinstance(raw, Explanation)
+            # Pad SHAP values back to the original feature space (zeros for dropped features)
+            n_orig = len(X.columns)
+            padded = np.zeros((len(X), n_orig))
+            if mask is not None:
+                padded[:, mask] = raw.values
+            else:
+                padded = raw.values
+            shap_values.append(
+                Explanation(
+                    padded,
+                    base_values=raw.base_values,
+                    data=X.to_numpy(),
+                    feature_names=list(X.columns),
+                )
             )
         else:
             raise ValueError(
@@ -1090,8 +1124,8 @@ def train_and_explain(
             )
 
         explainers.append(explainer)
-        shap_values.append(explainer(X_used.to_numpy()))
-        shap_row_indices.append(used_idx)
+        if not isinstance(estimator, LassoEstimator):
+            shap_values.append(explainer(X.to_numpy()))
 
     return ExperimentResults(
         species=species,
