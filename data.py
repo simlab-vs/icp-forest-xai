@@ -170,7 +170,9 @@ def prepare_data(
 
     # Transform the target to quantiles of the fitted distribution
     y_log_norm = lognorm.cdf(y_plus_one, shape, loc, scale)
-    y_log_norm = pl.Series(y_log_norm, dtype=pl.Float64)
+    y_log_norm = pl.Series(
+        "growth_rate_rel_log_norm", values=y_log_norm, dtype=pl.Float64
+    )
 
     return X, y_log_norm, (shape, loc, scale)
 

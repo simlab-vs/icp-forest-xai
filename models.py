@@ -10,6 +10,10 @@ from sklearn.linear_model import LassoCV, Lasso, RidgeCV, Ridge
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
@@ -79,7 +83,7 @@ def to_numpy(data: MatrixLike | VectorLike | None) -> np.ndarray | None:
     if data is None:
         return None
     if isinstance(data, pl.DataFrame):
-        return data.to_numpy()
+        return data.cast(pl.Float64).to_numpy()
     elif isinstance(data, pl.Series):
         return data.to_numpy()
     elif isinstance(data, np.ndarray):
@@ -87,6 +91,28 @@ def to_numpy(data: MatrixLike | VectorLike | None) -> np.ndarray | None:
     else:
         raise TypeError(
             f"Unsupported data type: {type(data)}. Expected DataFrame or Series."
+        )
+
+
+def to_pandas(data: MatrixLike) -> Any:
+    """Convert a matrix to a pandas DataFrame, preserving column names.
+
+    Used for LightGBM fit/predict so that feature_names_in_ stays consistent
+    and sklearn does not emit 'X does not have valid feature names' warnings.
+    LightGBM 4.x auto-assigns Column_0…N when fitted with numpy, then warns
+    on every numpy predict because the names don't match.
+    """
+    import pandas as pd
+
+    if isinstance(data, pl.DataFrame):
+        return data.cast(pl.Float64).to_pandas()
+    elif isinstance(data, pd.DataFrame):
+        return data
+    elif isinstance(data, np.ndarray):
+        return pd.DataFrame(data)
+    else:
+        raise TypeError(
+            f"Unsupported data type: {type(data)}. Expected DataFrame or ndarray."
         )
 
 
@@ -328,7 +354,7 @@ class LGBMEstimator(EstimatorProtocol):
 
             results = cross_validate(
                 estimator=estimator,
-                X=to_numpy(X),
+                X=to_pandas(X),
                 y=to_numpy(y),
                 groups=to_numpy(groups),
                 scoring=make_scorer(r2_score),
@@ -377,17 +403,13 @@ class LGBMEstimator(EstimatorProtocol):
         self._lgbm.set_params(**best_params)
         best_params.setdefault("verbosity", self.verbosity)
 
-        # Fit the model using LightGBM
-        self._lgbm.fit(
-            to_numpy(X) if isinstance(X, pl.DataFrame) else X,
-            to_numpy(y) if isinstance(y, pl.Series) else y,
-        )
+        self._lgbm.fit(to_pandas(X), to_numpy(y))
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        return self._lgbm.predict(to_numpy(X))  # type: ignore[return-value]
+        return self._lgbm.predict(to_pandas(X))  # type: ignore[return-value]
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
@@ -413,6 +435,7 @@ class LassoEstimator(EstimatorProtocol):
         self.cv = cv
         self.lasso_kwargs = kwargs.copy()
 
+        self._preprocessor = None
         self._model = None
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
@@ -444,17 +467,28 @@ class LassoEstimator(EstimatorProtocol):
             **self.lasso_kwargs,
         )
 
-        lasso_cv.fit(X, y, groups=to_numpy(groups))
-        self._model = Lasso(alpha=lasso_cv.alpha_).fit(X, y)
+        self._preprocessor = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("scaler", StandardScaler()),
+            ]
+        )
+
+        # Fit the preprocessor and transform the data
+        self._preprocessor.fit(X)
+        X_processed = self._preprocessor.transform(X)
+
+        lasso_cv.fit(X_processed, y, groups=to_numpy(groups))
+        self._model = Lasso(alpha=lasso_cv.alpha_).fit(X_processed, y)
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        if self._model is None:
+        if self._model is None or self._preprocessor is None:
             raise ValueError("Model has not been fitted yet.")
 
-        return self._model.predict(X)
+        return self._model.predict(self._preprocessor.transform(X))
 
     def get_sklearn(self) -> Lasso:
         """Get the underlying Lasso regressor."""
@@ -541,6 +575,8 @@ class ExperimentResults:
         Species for which the experiment was run.
     ablation
         Ablation study performed on the model.
+    temporal_blocking
+        Whether temporal blocking was used.
     X
         Dataframe containing the features.
     metadata
@@ -563,6 +599,7 @@ class ExperimentResults:
 
     species: Species
     ablation: Ablation
+    temporal_blocking: bool
 
     X: pl.DataFrame
     metadata: pl.DataFrame
@@ -835,7 +872,6 @@ def train_and_explain(
 
     # Prepare data
     X, y, dist_params = prepare_data(df, ablation)
-    shape, loc, scale = dist_params
 
     if group_by == "plot_id":
         use_temporal_cv = (
@@ -872,8 +908,12 @@ def train_and_explain(
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
     results = CrossValidationResults()
-    # splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+
     for fold, (train_idx, test_idx) in enumerate(splits):
+        # Split data into training and test sets
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
         # Create estimator
         if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)
@@ -894,15 +934,7 @@ def train_and_explain(
                 cv=cv,
                 n_jobs=n_jobs,
                 max_iter=25000,
-            )
-
-            # Input NaNs are not allowed in LassoCV, so we need to impute them
-            X = X.fill_null(0)
-
-            # Standardize the features
-            X = pl.DataFrame(
-                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
-                schema=X.schema,
+                tol=1e-6,
             )
 
         elif model_type == "ridge":
@@ -929,10 +961,6 @@ def train_and_explain(
             )
 
         print(f"Fold {fold + 1}/{cv}")
-
-        # Split data into training and test sets
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
 
         # Fit the model
         estimator.fit(
@@ -1012,6 +1040,7 @@ def train_and_explain(
     return ExperimentResults(
         species=species,
         ablation=ablation,
+        temporal_blocking=use_temporal_cv,
         X=X,
         metadata=df.select(pl.selectors.exclude(*X.columns)),
         y_true=y,
