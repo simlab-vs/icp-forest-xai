@@ -484,7 +484,26 @@ class LassoEstimator(EstimatorProtocol):
     def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LassoEstimator:
         """Fit the regressor to the training data."""
         groups = kwargs.get("groups", None)
-        feature_names = X.columns if isinstance(X, pl.DataFrame) else None
+        fold: int | None = kwargs.get("fold", None)
+        feature_names = list(X.columns) if isinstance(X, pl.DataFrame) else None
+        tag = f"{self.species}|fold={fold}" if fold is not None else self.species
+
+        X_np = to_numpy(X).astype(float)
+        y_arr = to_numpy(y).astype(float)
+
+        # Log per-feature missing rates (before imputation)
+        if feature_names is not None:
+            miss_rate = np.isnan(X_np).mean(axis=0)
+            high_miss = [
+                (f, float(r)) for f, r in zip(feature_names, miss_rate) if r > 0.5
+            ]
+            if high_miss:
+                logging.info(
+                    "[%s] %d feature(s) with >50%% missing: %s",
+                    tag,
+                    len(high_miss),
+                    ", ".join(f"{f}={r:.0%}" for f, r in high_miss),
+                )
 
         # Preprocessing: impute → drop near-zero variance → standardise
         self._preprocessor = Pipeline(
@@ -495,10 +514,8 @@ class LassoEstimator(EstimatorProtocol):
             ]
         )
 
-        X_np = to_numpy(X).astype(float)
         self._preprocessor.fit(X_np)
         X_proc = self._preprocessor.transform(X_np).astype(float)
-        y_arr = to_numpy(y).astype(float)
 
         # Report dropped features and persist mask for SHAP padding
         self._var_mask = self._preprocessor.named_steps["var_threshold"].get_support()
@@ -507,10 +524,18 @@ class LassoEstimator(EstimatorProtocol):
             if dropped:
                 logging.info(
                     "[%s] Dropped %d near-zero variance feature(s): %s",
-                    self.species,
+                    tag,
                     len(dropped),
                     dropped,
                 )
+
+        cond = float(np.linalg.cond(X_proc))
+        logging.info(
+            "[%s] Design matrix: shape=%s, cond=%.2e",
+            tag,
+            X_proc.shape,
+            cond,
+        )
 
         # Pre-compute splits so ElasticNetCV.fit() never needs a groups= kwarg
         groups_arr = to_numpy(groups)
@@ -530,12 +555,38 @@ class LassoEstimator(EstimatorProtocol):
         )
         en_cv.fit(X_proc, y_arr)
         alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
+
+        # Log per-fold CV MSE at the selected (alpha, l1_ratio) to spot bad folds
+        l1_idx = int(np.argmin(np.abs(np.atleast_1d(en_cv.l1_ratio) - l1_ratio)))
+        alpha_idx = int(np.argmin(np.abs(en_cv.alphas_[l1_idx] - alpha)))
+        fold_mses = en_cv.mse_path_[l1_idx][alpha_idx]
         logging.info(
-            "[%s] CV selected alpha=%.6f, l1_ratio=%.2f", self.species, alpha, l1_ratio
+            "[%s] CV selected alpha=%.6f, l1_ratio=%.2f | fold MSEs: %s",
+            tag,
+            alpha,
+            l1_ratio,
+            " ".join(f"{v:.4f}" for v in fold_mses),
         )
 
         # Final fit via CVXPY/CLARABEL: interior-point solver, guaranteed convergence
         coef, intercept = _solve_elasticnet(X_proc, y_arr, alpha, l1_ratio)
+
+        n_nonzero = int(np.sum(np.abs(coef) > 1e-6))
+        max_coef = float(np.max(np.abs(coef)))
+        if feature_names is not None:
+            kept_names = [f for f, keep in zip(feature_names, self._var_mask) if keep]
+            top_idx = np.argsort(np.abs(coef))[::-1][:5]
+            top = [(kept_names[i], float(coef[i])) for i in top_idx]
+            top_str = ", ".join(f"{f}={v:+.4f}" for f, v in top)
+        else:
+            top_str = "(feature names unavailable)"
+        logging.info(
+            "[%s] Coefficients: n_nonzero=%d, max|coef|=%.4f | top-5: %s",
+            tag,
+            n_nonzero,
+            max_coef,
+            top_str,
+        )
 
         # Store as ElasticNet so get_sklearn() / LinearExplainer stay compatible
         en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
@@ -1033,6 +1084,7 @@ def train_and_explain(
             y_train,
             groups=to_numpy(groups[train_idx]) if groups is not None else None,
             ablation=ablation,
+            fold=fold,
         )
 
         # Evaluate the model
