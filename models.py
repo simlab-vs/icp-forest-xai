@@ -5,7 +5,7 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import LassoCV, Lasso, RidgeCV, Ridge
+from sklearn.linear_model import ElasticNetCV, ElasticNet
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
@@ -458,8 +458,9 @@ class LassoEstimator(EstimatorProtocol):
         # Extract groups if provided
         groups = kwargs.get("groups", None)
 
-        # Use LassoCV for cross-validating the optimal alpha
-        lasso_cv = LassoCV(
+        # ElasticNet with l1_ratio=0.99 adds a tiny L2 term for numerical stability
+        lasso_cv = ElasticNetCV(
+            l1_ratio=0.99,
             cv=GroupKFold(n_splits=self.cv)
             if self.group_by is not None
             else KFold(n_splits=self.cv),
@@ -479,7 +480,9 @@ class LassoEstimator(EstimatorProtocol):
         X_processed = self._preprocessor.transform(X)
 
         lasso_cv.fit(X_processed, y, groups=to_numpy(groups))
-        self._model = Lasso(alpha=lasso_cv.alpha_).fit(X_processed, y)
+        self._model = ElasticNet(alpha=lasso_cv.alpha_, l1_ratio=0.99).fit(
+            X_processed, y
+        )
 
         return self
 
@@ -490,8 +493,8 @@ class LassoEstimator(EstimatorProtocol):
 
         return self._model.predict(self._preprocessor.transform(X))
 
-    def get_sklearn(self) -> Lasso:
-        """Get the underlying Lasso regressor."""
+    def get_sklearn(self) -> ElasticNet:
+        """Get the underlying ElasticNet regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
 
