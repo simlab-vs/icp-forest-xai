@@ -15,10 +15,11 @@ def check_significance(metric: str, k: int = 5) -> str:
 
     # Perform a t-test to check if the R2/rmse value is significantly positive
     standard_error = float(metric_error) / np.sqrt(k)
-    t_statistic = float(metric_value) / standard_error
-
-    # Calculate the p-value
-    p_value = stats.t.sf(t_statistic, k - 1)
+    if standard_error == 0:
+        p_value = 0.0 if float(metric_value) > 0 else 1.0
+    else:
+        t_statistic = float(metric_value) / standard_error
+        p_value = stats.t.sf(t_statistic, k - 1)
 
     if p_value < 0.001:
         return f"{metric_value} ± {metric_error}***"
