@@ -70,22 +70,11 @@ def _(mo):
         [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
         gap=2,
     )
-    return (
-        ablation_ui,
-        group_col_ui,
-        model_type_ui,
-        temporal_cv_ui,
-        weight_shap_ui,
-    )
+    return ablation_ui, group_col_ui, model_type_ui, weight_shap_ui
 
 
 @app.cell
-def _(
-    ablation_ui,
-    group_col_ui,
-    model_type_ui,
-    weight_shap_ui,
-):
+def _(ablation_ui, group_col_ui, model_type_ui, weight_shap_ui):
     model_type = model_type_ui.value
     ablation = ablation_ui.value
     group_col = None if group_col_ui.value == "none" else group_col_ui.value
