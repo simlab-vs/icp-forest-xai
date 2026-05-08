@@ -511,18 +511,23 @@ class LassoEstimator(EstimatorProtocol):
                     dropped,
                 )
 
-        # ElasticNetCV: warm-started path algorithm selects alpha and l1_ratio
+        # Pre-compute splits so ElasticNetCV.fit() never needs a groups= kwarg
         groups_arr = to_numpy(groups)
+        splitter = (
+            GroupKFold(n_splits=self.cv)
+            if self.group_by is not None
+            else KFold(n_splits=self.cv)
+        )
+        cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
+
         en_cv = ElasticNetCV(
             l1_ratio=[0.7, 0.9, 0.99],
             n_alphas=100,
-            cv=GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv),
+            cv=cv_splits,
             max_iter=100_000,
             verbose=False,
         )
-        en_cv.fit(X_proc, y_arr, groups=groups_arr)
+        en_cv.fit(X_proc, y_arr)
         alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
         logging.info(
             "[%s] CV selected alpha=%.6f, l1_ratio=%.2f", self.species, alpha, l1_ratio
