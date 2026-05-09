@@ -13,7 +13,7 @@ from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
@@ -490,9 +490,9 @@ class ElasticNetEstimator(EstimatorProtocol):
         self._miss_filter: MissingnessFilter | None = None
         self._preprocessor = None
         self._model = None
-        self._var_mask: np.ndarray | None = (
-            None  # bool mask into original feature space
-        )
+        self._var_mask: np.ndarray | None = None
+        self._y_min: float = -np.inf
+        self._y_max: float = np.inf
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -518,6 +518,7 @@ class ElasticNetEstimator(EstimatorProtocol):
 
         X_np = to_numpy(X).astype(float)
         y_arr = to_numpy(y).astype(float)
+        self._y_min, self._y_max = float(y_arr.min()), float(y_arr.max())
 
         # Log per-feature missing rates (before imputation)
         if feature_names is not None:
@@ -554,9 +555,9 @@ class ElasticNetEstimator(EstimatorProtocol):
         # Step 2: impute → drop near-zero variance → standardise on the filtered matrix
         self._preprocessor = Pipeline(
             steps=[
-                ("imputer", SimpleImputer(strategy="mean")),
+                ("imputer", SimpleImputer(strategy="median")),
                 ("var_threshold", VarianceThreshold(threshold=1e-4)),
-                ("scaler", StandardScaler()),
+                ("scaler", RobustScaler()),
             ]
         )
 
@@ -595,8 +596,9 @@ class ElasticNetEstimator(EstimatorProtocol):
         cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
 
         en_cv = ElasticNetCV(
-            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 0.99],
+            l1_ratio=[0.5, 0.7, 0.9, 0.95, 0.99],
             n_alphas=100,
+            eps=1e-2,
             cv=cv_splits,
             max_iter=100_000,
             random_state=self.random_state,
@@ -650,7 +652,7 @@ class ElasticNetEstimator(EstimatorProtocol):
         """Predict using the fitted regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
-        return self._model.predict(self.transform(X))
+        return np.clip(self._model.predict(self.transform(X)), self._y_min, self._y_max)
 
     def transform(self, X: MatrixLike) -> np.ndarray:
         """Apply the full preprocessing stack (missingness filter → impute → variance filter → scale)."""
