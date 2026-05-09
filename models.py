@@ -44,7 +44,7 @@ warnings.filterwarnings(
 )
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["gbdt", "lasso", "ridge"]
+ModelType = Literal["gbdt", "elasticnet"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -54,10 +54,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-RANDOM_STATE = 42  # Global random state for reproducibility
+RANDOM_STATE = 42
 ALL_SPECIES: list[Species] = ["spruce", "pine", "beech", "oak"]
-
-np.random.seed(RANDOM_STATE)  # Set the global random seed for NumPy
 
 
 # This is a hack to suppress stderr output from LightGBM
@@ -370,7 +368,10 @@ class LGBMEstimator(EstimatorProtocol):
 
             return results["test_r2"].mean()
 
-        study = optuna.create_study(direction="maximize")
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=self.random_state),
+        )
         with suppress_stderr():
             study.optimize(objective_fn, n_trials=self.num_iter)
 
@@ -466,7 +467,7 @@ def _solve_elasticnet(
     return beta.value, float(b0.value.item())
 
 
-class LassoEstimator(EstimatorProtocol):
+class ElasticNetEstimator(EstimatorProtocol):
     """ElasticNet regressor solved via CVXPY (CLARABEL/SCS)."""
 
     def __init__(
@@ -475,13 +476,15 @@ class LassoEstimator(EstimatorProtocol):
         species: Species,
         group_by: str | None = None,
         cv: int = 5,
+        random_state: int | None = RANDOM_STATE,
         **kwargs: Any,
     ):
-        """Initialize the LassoCV regressor."""
+        """Initialize the ElasticNet regressor."""
         self.species = species
         self.group_by = group_by
         self.cv = cv
-        self.lasso_kwargs = kwargs.copy()
+        self.random_state = random_state
+        self.elasticnet_kwargs = kwargs.copy()
 
         self._miss_filter: MissingnessFilter | None = None
         self._preprocessor = None
@@ -497,7 +500,7 @@ class LassoEstimator(EstimatorProtocol):
 
         return self._model.get_params(deep=deep)
 
-    def set_params(self, **params: Any) -> LassoEstimator:
+    def set_params(self, **params: Any) -> ElasticNetEstimator:
         """Set the parameters of the regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
@@ -505,7 +508,7 @@ class LassoEstimator(EstimatorProtocol):
         self._model.set_params(**params)
         return self
 
-    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LassoEstimator:
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> ElasticNetEstimator:
         """Fit the regressor to the training data."""
         groups = kwargs.get("groups", None)
         fold: int | None = kwargs.get("fold", None)
@@ -599,6 +602,7 @@ class LassoEstimator(EstimatorProtocol):
             n_alphas=100,
             cv=cv_splits,
             max_iter=100_000,
+            random_state=self.random_state,
             verbose=False,
         )
         en_cv.fit(X_proc, y_arr)
@@ -1021,7 +1025,7 @@ def train_and_explain(
     species
         Species to train the model for.
     model_type
-        Type of model to use for training, either "gbdt" or "lasso".
+        Type of model to use for training, either "gbdt" or "elasticnet".
     group_by
         Column to group by for cross-validation.
     cv
@@ -1092,8 +1096,8 @@ def train_and_explain(
                 cv=cv,
                 n_jobs=n_jobs,
             )
-        elif model_type == "lasso":
-            estimator = LassoEstimator(
+        elif model_type == "elasticnet":
+            estimator = ElasticNetEstimator(
                 species=species,
                 group_by=group_by,
                 cv=cv,
@@ -1119,7 +1123,7 @@ def train_and_explain(
             )
         else:
             raise ValueError(
-                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm', 'lasso', and 'ridge'."
+                f"Unknown estimator: {model_type}. Supported estimators are 'gbdt' and 'elasticnet'."
             )
 
         print(f"Fold {fold + 1}/{cv}")
@@ -1184,7 +1188,7 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, LassoEstimator):
+        elif isinstance(estimator, ElasticNetEstimator):
             X_bg_proc = estimator.transform(X_background)
             X_proc = estimator.transform(X)
             mask = estimator._var_mask
@@ -1218,11 +1222,11 @@ def train_and_explain(
         else:
             raise ValueError(
                 f"Unsupported estimator type: {type(estimator)}. "
-                "Supported types are LGBMEstimator and LassoEstimator."
+                "Supported types are LGBMEstimator and ElasticNetEstimator."
             )
 
         explainers.append(explainer)
-        if not isinstance(estimator, LassoEstimator):
+        if not isinstance(estimator, ElasticNetEstimator):
             shap_values.append(explainer(X.to_numpy()))
 
     return ExperimentResults(

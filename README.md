@@ -67,7 +67,7 @@ Data can be requested to the Program Co-ordinating Center of IPC Forests:
     ```python
     # Pick grouping strategy: "tree_id" or "plot_id"
     group_col = "tree_id"
-    # Pick model type: "gbdt" or "lasso"
+    # Pick model type: "gbdt" or "elasticnet"
     model_type: ModelType = "gbdt"
     # Ablation: "all", "tree-level-only", "plot-level-only", "no-defoliation", "max-defoliation"
     ablation: Ablation = "all"

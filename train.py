@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         default="gbdt",
-        choices=["gbdt", "lasso"],
+        choices=["gbdt", "elasticnet"],
         help="Model type (default: gbdt)",
     )
     parser.add_argument(

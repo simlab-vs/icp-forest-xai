@@ -54,55 +54,6 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
-    model_type_ui = mo.ui.dropdown(["gbdt", "lasso"], value="gbdt", label="Model")
-    ablation_ui = mo.ui.dropdown(
-        ["all", "no-defoliation", "tree-level-only", "plot-level-only"],
-        value="all",
-        label="Ablation",
-    )
-    group_col_ui = mo.ui.dropdown(
-        ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
-    )
-    temporal_cv_ui = mo.ui.switch(value=True, label="Temporal CV")
-    weight_shap_ui = mo.ui.switch(value=True, label="Weight SHAP by n")
-
-    mo.hstack(
-        [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
-        gap=2,
-    )
-    return ablation_ui, group_col_ui, model_type_ui, weight_shap_ui
-
-
-@app.cell
-def _(ablation_ui, group_col_ui, model_type_ui, weight_shap_ui):
-    model_type = model_type_ui.value
-    ablation = ablation_ui.value
-    group_col = None if group_col_ui.value == "none" else group_col_ui.value
-    weight_shap_fimp = weight_shap_ui.value
-    return ablation, group_col, model_type, weight_shap_fimp
-
-
-@app.cell
-def _(ablation, group_col, joblib, mo, model_type, os):
-    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
-    mo.stop(
-        not os.path.exists(_results_path),
-        mo.callout(
-            mo.md(
-                f"No cached results at `{_results_path}`.\n\nRun `./train-all.sh` (or "
-                f"`uv run train.py --model-type {model_type} --ablation {ablation} "
-                f"--group-col {group_col or 'none'} --temporal-cv`) first."
-            ),
-            kind="warn",
-        ),
-    )
-    all_results = joblib.load(_results_path)
-    mo.md(f"Loaded **{len(all_results)} species** from `{_results_path}`")
-    return (all_results,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
     mo.md("""
     ## Global Performance
     """)
@@ -117,7 +68,7 @@ def _(joblib, mo, os, pl):
 
     # Filename pattern: results-{ablation}-{model_type}-{group_col}.pkl
     # ablation may contain hyphens, so anchor model_type and group_col from the right.
-    _pat = _re.compile(r"^results-(.+)-(gbdt|lasso)-(tree_id|plot_id|None)\.pkl$")
+    _pat = _re.compile(r"^results-(.+)-(gbdt|elasticnet)-(tree_id|plot_id|None)\.pkl$")
     _csv = "./cache/performance_summary.csv"
 
     _loaded = []
@@ -144,79 +95,116 @@ def _(joblib, mo, os, pl):
         ),
     )
 
-    _df = pl.read_csv(_csv).filter(
-        (pl.col("group_by") == "tree_id") & (pl.col("temporal_cv") == "yes")
-    )
+    perf_df = pl.read_csv(_csv).filter(pl.col("temporal_cv") == "yes")
 
-    _r2_rows = _df.filter(pl.col("split") == "test_r2").select(
-        "model", "ablation", "spruce", "pine", "beech", "oak"
+    mo.md(
+        f"Loaded **{len(_loaded)}** cached run(s): {', '.join(f'`{r}`' for r in _loaded)}"
     )
+    return (perf_df,)
 
-    # Weighted mean R² = Σ_species (n_species/n_total × R²_species)
-    _weighted = _df.filter(pl.col("split") == "test_weight_r2").select(
-        "model",
-        "ablation",
-        weighted_r2=(
-            pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
-            + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
-            + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
-            + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
-        )
-        .round(2)
-        .cast(pl.Utf8),
-    )
 
-    _ablation_labels = {
+@app.cell
+def _(mo, perf_df, pl):
+    _ABLATION_LABELS = {
         "all": "all features",
         "no-defoliation": "no defoliation",
         "plot-level-only": "plot-level features only",
         "tree-level-only": "tree-level features only",
     }
-    _ablation_order = {
+    _ABLATION_ORDER = {
         "all": 0,
         "no-defoliation": 1,
         "plot-level-only": 2,
         "tree-level-only": 3,
     }
+    _MODEL_LABELS = {"gbdt": "GBDT", "elasticnet": "ElasticNet"}
 
-    paper_table = (
-        _r2_rows.join(_weighted, on=["model", "ablation"], how="left")
-        .with_columns(
-            config=pl.concat_str(
-                pl.when(pl.col("model") == "gbdt")
-                .then(pl.lit("GBDT"))
-                .otherwise(pl.lit("Lasso")),
-                pl.lit(" ("),
-                pl.col("ablation").map_elements(
-                    lambda a: _ablation_labels.get(a, a), return_dtype=pl.Utf8
+    def build_paper_table(df: pl.DataFrame) -> pl.DataFrame:
+        """Format a filtered performance DataFrame into a paper-ready R² table."""
+        _r2_rows = df.filter(pl.col("split") == "test_r2").select(
+            "model", "ablation", "spruce", "pine", "beech", "oak"
+        )
+        # Weighted mean R² = Σ_species (n_species/n_total × R²_species)
+        _weighted = df.filter(pl.col("split") == "test_weight_r2").select(
+            "model",
+            "ablation",
+            weighted_r2=(
+                pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
+            )
+            .round(2)
+            .cast(pl.Utf8),
+        )
+        return (
+            _r2_rows.join(_weighted, on=["model", "ablation"], how="left")
+            .with_columns(
+                config=pl.concat_str(
+                    pl.col("model").map_elements(
+                        lambda m: _MODEL_LABELS.get(m, m), return_dtype=pl.Utf8
+                    ),
+                    pl.lit(" ("),
+                    pl.col("ablation").map_elements(
+                        lambda a: _ABLATION_LABELS.get(a, a), return_dtype=pl.Utf8
+                    ),
+                    pl.lit(")"),
                 ),
-                pl.lit(")"),
-            ),
-            _model_ord=pl.when(pl.col("model") == "gbdt").then(0).otherwise(1),
-            _ablation_ord=pl.col("ablation").map_elements(
-                lambda a: _ablation_order.get(a, 99), return_dtype=pl.Int32
-            ),
+                _model_ord=pl.when(pl.col("model") == "gbdt").then(0).otherwise(1),
+                _ablation_ord=pl.col("ablation").map_elements(
+                    lambda a: _ABLATION_ORDER.get(a, 99), return_dtype=pl.Int32
+                ),
+            )
+            .sort("_model_ord", "_ablation_ord")
+            .rename(
+                {
+                    "spruce": "Spruce",
+                    "pine": "Pine",
+                    "beech": "Beech",
+                    "oak": "Oak",
+                    "weighted_r2": "Weighted R²",
+                }
+            )
+            .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted R²")
+            .rename({"config": "Configuration"})
         )
-        .sort("_model_ord", "_ablation_ord")
-        .rename(
-            {
-                "spruce": "Spruce",
-                "pine": "Pine",
-                "beech": "Beech",
-                "oak": "Oak",
-                "weighted_r2": "Weighted R²",
-            }
-        )
-        .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted R²")
-        .rename({"config": "Configuration"})
+
+    _df_tree = perf_df.filter(pl.col("group_by") == "tree_id")
+    mo.vstack(
+        [
+            mo.md(
+                "**Table 2**: R² test scores on 5-fold cross-validation grouped by tree identifiers."
+            ),
+            mo.ui.table(build_paper_table(_df_tree)),
+        ]
+    )
+    return (build_paper_table,)
+
+
+@app.cell
+def _(build_paper_table, mo, perf_df, pl):
+    _df_plot = perf_df.filter(
+        (pl.col("group_by") == "plot_id") & (pl.col("ablation") == "all")
+    )
+
+    mo.stop(
+        _df_plot.is_empty(),
+        mo.callout(
+            mo.md(
+                "No `plot_id` results found. "
+                "Run `uv run train.py --group-col plot_id --temporal-cv` for each model type."
+            ),
+            kind="info",
+        ),
     )
 
     mo.vstack(
         [
             mo.md(
-                f"Loaded **{len(_loaded)}** cached run(s): {', '.join(f'`{r}`' for r in _loaded)}"
+                "**Table 3**: R² test scores on 5-fold cross-validation grouped by plot identifiers. "
+                "Best strictly positive score for each species is indicated in bold."
             ),
-            mo.ui.table(paper_table),
+            mo.ui.table(build_paper_table(_df_plot)),
         ]
     )
     return
@@ -228,6 +216,59 @@ def _(mo):
     ## Feature importance
     """)
     return
+
+
+@app.cell
+def _(mo):
+    model_type_ui = mo.ui.dropdown(["gbdt", "elasticnet"], value="gbdt", label="Model")
+    ablation_ui = mo.ui.dropdown(
+        ["all", "no-defoliation", "tree-level-only", "plot-level-only"],
+        value="all",
+        label="Ablation",
+    )
+    group_col_ui = mo.ui.dropdown(
+        ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
+    )
+    temporal_cv_ui = mo.ui.switch(value=True, label="Temporal CV")
+    weight_shap_ui = mo.ui.switch(value=True, label="Weight SHAP by n")
+
+    mo.hstack(
+        [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
+        gap=2,
+    )
+    return ablation_ui, group_col_ui, model_type_ui, weight_shap_ui
+
+
+@app.cell
+def _(
+    ablation_ui,
+    group_col_ui,
+    joblib,
+    mo,
+    model_type_ui,
+    os,
+    weight_shap_ui,
+):
+    model_type = model_type_ui.value
+    ablation = ablation_ui.value
+    group_col = None if group_col_ui.value == "none" else group_col_ui.value
+    weight_shap_fimp = weight_shap_ui.value
+
+    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
+    mo.stop(
+        not os.path.exists(_results_path),
+        mo.callout(
+            mo.md(
+                f"No cached results at `{_results_path}`.\n\nRun `./train-all.sh` (or "
+                f"`uv run train.py --model-type {model_type} --ablation {ablation} "
+                f"--group-col {group_col or 'none'} --temporal-cv`) first."
+            ),
+            kind="warn",
+        ),
+    )
+    all_results = joblib.load(_results_path)
+    mo.md(f"Loaded **{len(all_results)} species** from `{_results_path}`")
+    return ablation, all_results, group_col, model_type, weight_shap_fimp
 
 
 @app.cell
@@ -391,7 +432,7 @@ def _(
     )
     plt.ylabel("Feature")
     plt.title(
-        f"Feature importance ({'GBDT' if model_type == 'gbdt' else 'Lasso'}, "
+        f"Feature importance ({'GBDT' if model_type == 'gbdt' else 'ElasticNet'}, "
         f"{'all features' if ablation == 'all' else 'w/o defoliation'})"
     )
     plt.savefig(
