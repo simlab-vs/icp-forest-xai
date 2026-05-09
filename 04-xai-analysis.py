@@ -271,6 +271,57 @@ def _(
     return ablation, all_results, group_col, model_type, weight_shap_fimp
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### Hyperparameters
+    """)
+    return
+
+
+@app.cell
+def _(ablation, group_col, mo, model_type, os, pl):
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+
+    mo.stop(
+        not os.path.exists(_hp_path),
+        mo.callout(
+            mo.md(
+                f"`{_hp_path}` not found — re-run training to generate hyperparameter logs."
+            ),
+            kind="info",
+        ),
+    )
+
+    _hp = pl.read_parquet(_hp_path)
+    _param_cols = [c for c in _hp.columns if c not in ("species", "fold")]
+
+    hp_summary = (
+        _hp.group_by("species")
+        .agg(
+            [
+                pl.concat_str(
+                    pl.col(p).mean().round(4).cast(pl.Utf8),
+                    pl.lit(" ± "),
+                    pl.col(p).std().round(4).cast(pl.Utf8),
+                ).alias(p)
+                for p in _param_cols
+            ]
+        )
+        .sort("species")
+    )
+
+    mo.vstack(
+        [
+            mo.md("Mean ± std across CV folds per species."),
+            mo.ui.table(hp_summary),
+            mo.md("**Per-fold values**"),
+            mo.ui.table(_hp.sort("species", "fold")),
+        ]
+    )
+    return
+
+
 @app.cell
 def _(ablation, all_results, cs, group_col, model_type, np, pl):
     feature_importances = pl.from_dicts(

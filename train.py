@@ -103,6 +103,28 @@ def _print_summary(all_results: dict[Species, ExperimentResults]) -> None:
     print(f"{'Weighted':<12} | {weighted_r2:.3f}{'':<19} | {weighted_rmse:.3f}")
 
 
+def _save_hyperparams(
+    all_results: dict[Species, ExperimentResults],
+    ablation: str,
+    model_type: str,
+    group_col: str | None,
+) -> None:
+    rows = []
+    for species, results in all_results.items():
+        for fold, estimator in enumerate(results.estimators):
+            get_hp = getattr(estimator, "get_hyperparams", None)
+            if get_hp is None:
+                continue
+            rows.append({"species": species, "fold": fold, **get_hp()})
+
+    if not rows:
+        return
+
+    path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+    pl.DataFrame(rows).write_parquet(path)
+    print(f"Hyperparameters saved to {path}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -158,6 +180,8 @@ def main() -> None:
     fi_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
     feature_importances.write_parquet(fi_path)
     print(f"Feature importances saved to {fi_path}")
+
+    _save_hyperparams(all_results, ablation, model_type, group_col)
 
     _print_summary(all_results)
 

@@ -229,6 +229,7 @@ class LGBMEstimator(EstimatorProtocol):
 
         self.num_iter = 100
         self.verbosity = verbosity
+        self.best_params_: dict[str, Any] = {}
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -402,6 +403,7 @@ class LGBMEstimator(EstimatorProtocol):
             X, y, ablation=ablation, groups=groups, use_caching=True
         )
 
+        self.best_params_ = dict(best_params)
         self._lgbm.set_params(**best_params)
         best_params.setdefault("verbosity", self.verbosity)
 
@@ -412,6 +414,9 @@ class LGBMEstimator(EstimatorProtocol):
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
         return self._lgbm.predict(to_pandas(X))  # type: ignore[return-value]
+
+    def get_hyperparams(self) -> dict[str, Any]:
+        return dict(self.best_params_)
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
@@ -661,6 +666,14 @@ class ElasticNetEstimator(EstimatorProtocol):
             raise ValueError("Model has not been fitted yet.")
         X_np = to_numpy(X).astype(float)
         return self._preprocessor.transform(self._miss_filter.transform(X_np))
+
+    def get_hyperparams(self) -> dict[str, Any]:
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+        return {
+            "alpha": float(self._model.alpha),
+            "l1_ratio": float(self._model.l1_ratio),
+        }
 
     def get_sklearn(self) -> ElasticNet:
         """Get the underlying ElasticNet regressor."""
