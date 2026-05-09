@@ -1078,7 +1078,11 @@ def train_and_explain(
         )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
-            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+            temporal_cv.run_cross_validation(
+                species=species,
+                ablation=ablation,
+                tree_group=group_by or "tree_id",
+            )
         ):
             splits.append((train_idx, test_idx))
     else:
