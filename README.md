@@ -60,21 +60,11 @@ Data can be requested to the Program Co-ordinating Center of IPC Forests:
 - Run the notebook `00-preprocessing.ipynb` to preprocess the raw data. This
   will generate the tidy data in the `./data/tidy` directory.
 - You may then run the `01-explore.ipynb` notebook to explore the data.
-- Finally, run the notebook `02-modeling.ipynb` to train the models and
-  generate the figures of the paper. You must run manually the different
-  variants and ablations by adjusting the following cell:
-
-    ```python
-    # Pick grouping strategy: "tree_id" or "plot_id"
-    group_col = "tree_id"
-    # Pick model type: "gbdt" or "elasticnet"
-    model_type: ModelType = "gbdt"
-    # Ablation: "all", "tree-level-only", "plot-level-only", "no-defoliation", "max-defoliation"
-    ablation: Ablation = "all"
-    ```
-
-  Results are cached in the `./cache/` directory to avoid retraining models
+- Finally, run the script `./train-all.sh`, which train all variants reported
+  in the paper. Results are cached in the `./cache/` directory to avoid retraining models
   at each run.
+- Generate the figures and tables of the paper with using the notebook
+  `04-xai-analysis.py` (Marimo).
 
 ## Support
 

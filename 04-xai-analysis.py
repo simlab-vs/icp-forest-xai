@@ -227,7 +227,7 @@ def _(mo):
         label="Ablation",
     )
     group_col_ui = mo.ui.dropdown(
-        ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
+        ["tree_id", "plot_id"], value="tree_id", label="Group by"
     )
     temporal_cv_ui = mo.ui.switch(value=True, label="Temporal CV")
     weight_shap_ui = mo.ui.switch(value=True, label="Weight SHAP by n")
@@ -251,7 +251,7 @@ def _(
 ):
     model_type = model_type_ui.value
     ablation = ablation_ui.value
-    group_col = None if group_col_ui.value == "none" else group_col_ui.value
+    group_col = group_col_ui.value
     weight_shap_fimp = weight_shap_ui.value
 
     _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
@@ -261,7 +261,7 @@ def _(
             mo.md(
                 f"No cached results at `{_results_path}`.\n\nRun `./train-all.sh` (or "
                 f"`uv run train.py --model-type {model_type} --ablation {ablation} "
-                f"--group-col {group_col or 'none'} --temporal-cv`) first."
+                f"--group-col {group_col} --temporal-cv`) first."
             ),
             kind="warn",
         ),

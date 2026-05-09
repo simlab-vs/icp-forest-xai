@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-col",
         default="tree_id",
-        choices=["tree_id", "plot_id", "none"],
+        choices=["tree_id", "plot_id"],
         help="Grouping column for K-fold CV (default: tree_id)",
     )
     parser.add_argument(
@@ -107,7 +107,7 @@ def _save_hyperparams(
     all_results: dict[Species, ExperimentResults],
     ablation: str,
     model_type: str,
-    group_col: str | None,
+    group_col: str,
 ) -> None:
     rows = []
     for species, results in all_results.items():
@@ -128,7 +128,7 @@ def _save_hyperparams(
 def main() -> None:
     args = parse_args()
 
-    group_col: str | None = None if args.group_col == "none" else args.group_col
+    group_col: str = args.group_col
     model_type: ModelType = args.model_type
     ablation: Ablation = args.ablation
     use_temporal_cv: bool = args.temporal_cv

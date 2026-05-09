@@ -9,7 +9,7 @@ from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
-from sklearn.model_selection import KFold, GroupKFold, cross_validate
+from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -205,7 +205,7 @@ class LGBMEstimator(EstimatorProtocol):
         self,
         *,
         species: Species,
-        group_by: str | None,
+        group_by: str,
         cv: int = 5,
         n_jobs: int = -1,
         random_state: int | None = RANDOM_STATE,
@@ -358,9 +358,7 @@ class LGBMEstimator(EstimatorProtocol):
                 y=to_numpy(y),
                 groups=to_numpy(groups),
                 scoring=make_scorer(r2_score),
-                cv=KFold(n_splits=self.cv)
-                if self.group_by is None
-                else GroupKFold(n_splits=self.cv),
+                cv=GroupKFold(n_splits=self.cv),
                 n_jobs=self.n_jobs,
             )
 
@@ -393,10 +391,8 @@ class LGBMEstimator(EstimatorProtocol):
         groups = kwargs.get("groups", None)
         ablation = kwargs.get("ablation", "all")
 
-        if self.group_by is not None and groups is None:
-            raise ValueError(
-                "Group information is required for cross-validation with group_by."
-            )
+        if groups is None:
+            raise ValueError("Group information is required for cross-validation.")
 
         # Optimize hyperparameters if not already done
         best_params, _ = self.optimize_hyperparameters(
@@ -479,7 +475,7 @@ class ElasticNetEstimator(EstimatorProtocol):
         self,
         *,
         species: Species,
-        group_by: str | None = None,
+        group_by: str,
         cv: int = 5,
         random_state: int | None = RANDOM_STATE,
         **kwargs: Any,
@@ -595,11 +591,7 @@ class ElasticNetEstimator(EstimatorProtocol):
 
         # Pre-compute splits so ElasticNetCV.fit() never needs a groups= kwarg
         groups_arr = to_numpy(groups)
-        splitter = (
-            GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv)
-        )
+        splitter = GroupKFold(n_splits=self.cv)
         cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
 
         en_cv = ElasticNetCV(
@@ -1026,7 +1018,7 @@ def train_and_explain(
     *,
     model_type: ModelType,
     ablation: Ablation = "all",
-    group_by: str | None,
+    group_by: str,
     cv: int = 5,
     n_jobs: int = -1,
     use_temporal_cv: bool = False,
@@ -1064,10 +1056,7 @@ def train_and_explain(
         )
 
     # Prepare groups
-    if group_by is not None:
-        groups = df.select(group_by).to_series()
-    else:
-        groups = None
+    groups = df.select(group_by).to_series()
 
     # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
     if use_temporal_cv:
@@ -1081,15 +1070,14 @@ def train_and_explain(
             temporal_cv.run_cross_validation(
                 species=species,
                 ablation=ablation,
-                tree_group=group_by or "tree_id",
+                tree_group=group_by,
             )
         ):
             splits.append((train_idx, test_idx))
     else:
         splits = []
-        splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
         for fold, (train_idx, test_idx) in enumerate(
-            splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+            GroupKFold(n_splits=cv).split(to_numpy(X), y, groups=to_numpy(groups))
         ):
             splits.append((train_idx, test_idx))
 
