@@ -442,32 +442,6 @@ class MissingnessFilter:
         return self.mask_
 
 
-def _solve_elasticnet(
-    X: np.ndarray,
-    y: np.ndarray,
-    alpha: float,
-    l1_ratio: float,
-) -> tuple[np.ndarray, float]:
-    """Solve ElasticNet via CVXPY/CLARABEL (interior-point, guaranteed convergence)."""
-    import cvxpy as cp
-
-    n, p = X.shape
-    beta = cp.Variable(p)
-    b0 = cp.Variable()
-
-    loss = (1.0 / (2 * n)) * cp.sum_squares(y - X @ beta - b0)
-    reg = alpha * l1_ratio * cp.norm1(beta) + 0.5 * alpha * (
-        1 - l1_ratio
-    ) * cp.sum_squares(beta)
-    prob = cp.Problem(cp.Minimize(loss + reg))
-    prob.solve(solver=cp.CLARABEL, verbose=False)
-
-    if beta.value is None or b0.value is None:
-        raise RuntimeError(f"CVXPY solver failed: status={prob.status}")
-
-    return beta.value, float(b0.value.item())
-
-
 class ElasticNetEstimator(EstimatorProtocol):
     """ElasticNet regressor solved via CVXPY (CLARABEL/SCS)."""
 
@@ -619,9 +593,10 @@ class ElasticNetEstimator(EstimatorProtocol):
             " ".join(f"{v:.4f}" for v in fold_mses),
         )
 
-        # Final fit via CVXPY/CLARABEL: interior-point solver, guaranteed convergence
-        coef, intercept = _solve_elasticnet(X_proc, y_arr, alpha, l1_ratio)
+        en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=100_000)
+        en.fit(X_proc, y_arr)
 
+        coef = en.coef_
         n_nonzero = int(np.sum(np.abs(coef) > 1e-6))
         max_coef = float(np.max(np.abs(coef)))
         if feature_names is not None:
@@ -639,11 +614,6 @@ class ElasticNetEstimator(EstimatorProtocol):
             top_str,
         )
 
-        # Store as ElasticNet so get_sklearn() / LinearExplainer stay compatible
-        en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio)
-        en.coef_ = coef
-        en.intercept_ = intercept
-        setattr(en, "n_features_in_", X_proc.shape[1])
         self._model = en
 
         return self
