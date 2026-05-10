@@ -5,11 +5,11 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import ElasticNet, ElasticNetCV
+from sklearn.linear_model import ElasticNet, ElasticNetCV, Ridge, RidgeCV
 from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
-from sklearn.model_selection import GroupKFold, cross_validate
+from sklearn.model_selection import GroupKFold, KFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -443,7 +443,7 @@ class MissingnessFilter:
 
 
 class ElasticNetEstimator(EstimatorProtocol):
-    """ElasticNet regressor solved via CVXPY (CLARABEL/SCS)."""
+    """ElasticNet regressor with cross-validated hyperparameter selection."""
 
     def __init__(
         self,
@@ -1154,10 +1154,6 @@ def train_and_explain(
     for fold, estimator in enumerate(results.estimator):
         train_idx = results.indices["train"][fold].to_numpy()
         test_idx = results.indices["test"][fold].to_numpy()
-        # Since some data will be lost use temporal blocking
-        used_idx = np.concatenate([train_idx, test_idx])
-        X_used = X[used_idx]
-
         # Create a SHAP explainer for the LGBM model
         if isinstance(estimator, LGBMEstimator):
             explainer = TreeExplainer(
