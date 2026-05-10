@@ -35,11 +35,12 @@ def _():
 
     from models import ALL_SPECIES
     from config import FEATURES_METADATA
-    from explain import plot_dependence, compute_interaction_matrix
+    from explain import plot_dependence, compute_interaction_matrix, PlotType
 
     return (
         ALL_SPECIES,
         FEATURES_METADATA,
+        PlotType,
         compute_interaction_matrix,
         cs,
         joblib,
@@ -454,7 +455,7 @@ def _(
         y="feature",
         hue="species",
         kind="bar",
-        palette=sns.color_palette("cmo.thermal", n_colors=_n_species + 1),
+        palette=sns.color_palette("plasma", n_colors=_n_species + 1),
         height=8,
         aspect=0.6,
     )
@@ -607,8 +608,9 @@ def _(ALL_SPECIES, FEATURES_METADATA, mo):
         value="all",
         label="Species",
     )
-    mo.hstack([dep_feature_ui, dep_species_ui], gap=2)
-    return dep_feature_ui, dep_species_ui
+    dep_original_space_ui = mo.ui.switch(value=False, label="Original space")
+    mo.hstack([dep_feature_ui, dep_species_ui, dep_original_space_ui], gap=2)
+    return dep_feature_ui, dep_original_space_ui, dep_species_ui
 
 
 @app.cell
@@ -616,12 +618,14 @@ def _(
     ALL_SPECIES,
     all_results,
     dep_feature_ui,
+    dep_original_space_ui,
     dep_species_ui,
     plot_dependence,
     plt,
 ):
     _feature = dep_feature_ui.value
     _species_sel = dep_species_ui.value
+    _use_original = dep_original_space_ui.value
     _species_list = ALL_SPECIES if _species_sel == "all" else [_species_sel]
 
     _n = len(_species_list)
@@ -634,11 +638,14 @@ def _(
             all_results[_sp],
             feature=_feature,
             alpha=0.3,
+            use_original_space=_use_original,
             ax=_ax,
         )
         _ax.set_title(_sp.capitalize())
         _ax.set_xlabel(_feature)
-        _ax.set_ylabel("SHAP value [%]")
+        _ax.set_ylabel(
+            "SHAP value" if _use_original else "SHAP value [percentile rank %]"
+        )
 
     for _j in range(_i + 1, len(_axes.flatten())):
         _axes.flatten()[_j].set_visible(False)
@@ -691,6 +698,119 @@ def _(
         all_results[_sp], top_n=_top_n_features, ax=_ax, vmax=0.006
     )
     plt.title(f"Feature interactions — {_sp.capitalize()}")
+    plt.tight_layout()
+    plt.gca()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Defoliation analysis
+    """)
+    return
+
+
+@app.cell
+def _(ALL_SPECIES, PlotType, all_results, plot_dependence, plt):
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    for _sp, _ax in zip(ALL_SPECIES, _axes.flatten()):
+        plot_dependence(
+            all_results[_sp],
+            feature="defoliation_mean",
+            ax=_ax,
+            xlim=(0, 100),
+            plot_type=PlotType.LINE,
+            linewidth=4.0,
+            show_no_effect=False,
+            ylim=(-15, 10),
+        )
+        plot_dependence(
+            all_results[_sp],
+            feature="defoliation_max",
+            ax=_ax,
+            xlim=(0, 100),
+            color="#ff7f0e",
+            plot_type=PlotType.LINE,
+            linewidth=4.0,
+            show_no_effect=False,
+            ylim=(-15, 10),
+            with_density=False,
+        )
+        _ax.set_title(_sp.capitalize())
+        _ax.set_xlabel("Defoliation [%]")
+        _ax.set_ylabel("SHAP value [percentile rank %]")
+
+    _fig.legend(
+        title="Feature",
+        labels=[
+            "Mean defoliation (μ)",
+            "Mean defoliation (95p)",
+            "Max defoliation (μ)",
+            "Max defoliation (95p)",
+        ],
+    )
+    _fig.suptitle("Dependence of growth rate on mean and max defoliation")
+    plt.tight_layout()
+    plt.gca()
+    return
+
+
+@app.cell
+def _(ALL_SPECIES, all_results, np, plt):
+    import matplotlib.cm as _cm
+    from matplotlib.colors import TwoSlopeNorm as _TwoSlopeNorm
+
+    _norm = _TwoSlopeNorm(vmin=-0.30, vcenter=0, vmax=0.2)
+    _cmap = plt.get_cmap("coolwarm")
+    _fold = 0
+
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 9))
+
+    for _sp, _ax in zip(ALL_SPECIES, _axes.flatten()):
+        _data = all_results[_sp].get_data(fold=_fold, split="all")[0]
+        _shap_vals = (
+            all_results[_sp].shap_values[_fold][:, "defoliation_median"].values
+            + all_results[_sp].shap_values[_fold][:, "defoliation_max"].values
+        )
+
+        _ax.plot([0, 100], [0, 100], color="grey", linestyle="--", linewidth=1)
+        _ax.text(5, 5, "y = x", color="grey", fontsize=10, ha="left", va="top")
+        _ax.scatter(
+            _data["defoliation_median"].to_numpy(),
+            _data["defoliation_max"].to_numpy(),
+            c=_shap_vals,
+            alpha=0.8,
+            s=15,
+            cmap=_cmap,
+            norm=_norm,
+        )
+
+        _r2 = (
+            np.corrcoef(
+                _data["defoliation_median"].to_numpy(),
+                _data["defoliation_max"].to_numpy(),
+            )[0, 1]
+            ** 2
+        )
+        _ax.set_title(f"{_sp.capitalize()} (R² = {_r2:.2f})", fontsize=12)
+        _ax.set_xlabel("Median defoliation")
+        _ax.set_ylabel("Max defoliation")
+        _ax.set_xlim(0, 100)
+        _ax.set_ylim(0, 100)
+
+    _fig.colorbar(
+        _cm.ScalarMappable(norm=_norm, cmap=_cmap),
+        ax=_axes,
+        cax=_fig.add_axes([1.01, 0.15, 0.02, 0.7]),
+        label="Sum of SHAP values of median and max defoliation",
+        orientation="vertical",
+        use_gridspec=True,
+    )
+    _fig.suptitle(
+        f"Relation between median and max defoliation (fold {_fold})", fontsize=16
+    )
     plt.tight_layout()
     plt.gca()
     return

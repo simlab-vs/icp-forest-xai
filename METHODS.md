@@ -51,15 +51,16 @@ test:
    predictions. Soil-solution chemistry features (`ss_*`) are the
    primary affected group for spruce in the no-defoliation ablation.
 
-2. **Mean imputation** — remaining missing values are filled with the
-   column mean of the training fold (`SimpleImputer(strategy="mean")`).
+2. **Median imputation** — remaining missing values are filled with the
+   column median of the training fold (`SimpleImputer(strategy="median")`).
 
 3. **Near-zero variance filter** — features whose variance falls below
    1 × 10⁻⁴ after imputation are dropped
    (`VarianceThreshold(threshold=1e-4)`).
 
-4. **Standardisation** — features are centred and scaled to unit
-   variance (`StandardScaler`).
+4. **Robust scaling** — features are centred by median and scaled by
+   interquartile range (`RobustScaler`), which limits the influence of
+   outliers on the regularisation path.
 
 ### 3.2 Hyperparameter selection
 
@@ -67,11 +68,10 @@ Regularisation hyperparameters are selected by **ElasticNetCV** (sklearn
 warm-started coordinate-descent path algorithm) using the same 5-fold
 grouped splits as the outer loop. The search covers:
 
-- **α** (regularisation strength): 100 values on a log scale from
-  α_max down to α_max × 10⁻³, where α_max is the smallest value
-  that drives all coefficients to zero.
-- **ℓ₁ ratio**: {0.1, 0.3, 0.5, 0.7, 0.9, 0.99}, interpolating
-  between Ridge (ℓ₁ ratio = 0) and Lasso (ℓ₁ ratio = 1).
+- **α** (regularisation strength): 100 values on a log scale spanning
+  [10⁻², 10²] (`np.logspace(-2, 2, 100)`).
+- **ℓ₁ ratio**: {0.5, 0.7, 0.9, 0.95, 0.99}, interpolating between
+  Ridge (ℓ₁ ratio = 0) and Lasso (ℓ₁ ratio = 1).
 
 The warm-started path algorithm is used for hyperparameter selection
 because it is orders of magnitude faster than solving each
@@ -80,19 +80,10 @@ because it is orders of magnitude faster than solving each
 ### 3.3 Final model fit
 
 Given the hyperparameters selected in §3.2, the final model for each
-outer fold is fitted using **CVXPY with the CLARABEL interior-point
-solver** rather than coordinate descent. Coordinate descent can fail to
-converge on ill-conditioned feature subsets (particularly after temporal
-blocking removes large contiguous blocks of data), whereas an
-interior-point solver terminates only when the KKT optimality conditions
-are satisfied, guaranteeing a globally optimal solution regardless of
-conditioning.
-
-The objective minimised is the standard ElasticNet:
-
-$$\min_{\beta,\beta_0}\ \tfrac{1}{2n}\|y-X\beta-\beta_0\|_2^2 \;+\; \alpha\lambda\|\beta\|_1 \;+\; \tfrac{\alpha(1-\lambda)}{2}\|\beta\|_2^2$$
-
-where λ is the ℓ₁ ratio and the intercept β₀ is not penalised.
+outer fold is fitted using sklearn's **`ElasticNet`** (coordinate
+descent, `max_iter=100 000`). The high iteration cap ensures convergence
+on the ill-conditioned feature subsets that can arise after temporal
+blocking removes large contiguous blocks of data.
 
 ---
 
