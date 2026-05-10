@@ -571,7 +571,7 @@ class ElasticNetEstimator(EstimatorProtocol):
 
         en_cv = ElasticNetCV(
             l1_ratio=[0.5, 0.7, 0.9, 0.95, 0.99],
-            n_alphas=100,
+            alphas=np.logspace(-2, 2, 100),
             eps=1e-2,
             cv=cv_splits,
             max_iter=100_000,
