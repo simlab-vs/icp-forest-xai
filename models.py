@@ -718,6 +718,7 @@ class ExperimentResults:
         shape, loc, scale = dist_params
         if shape is None or loc is None or scale is None:
             raise ValueError("dist_params contains None; cannot inverse transform.")
+        # Clip away exact 0/1 to avoid lognorm.ppf returning -inf/+inf at the CDF boundaries.
         y_orig = pl.Series(
             lognorm.ppf(
                 np.clip(to_numpy(y), 1e-6, 1 - 1e-6),
