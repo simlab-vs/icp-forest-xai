@@ -64,7 +64,7 @@ Data can be requested to the Program Co-ordinating Center of IPC Forests:
   in the paper. Results are cached in the `./cache/` directory to avoid retraining models
   at each run.
 - Generate the figures and tables of the paper with using the notebook
-  `04-xai-analysis.py` (Marimo).
+  `02-xai-analysis.py` (Marimo).
 
 ## Support
 
