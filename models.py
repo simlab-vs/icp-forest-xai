@@ -1,15 +1,14 @@
 # Train models
 from __future__ import annotations
 
-import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import ElasticNet, ElasticNetCV, Ridge, RidgeCV
+from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
-from sklearn.model_selection import GroupKFold, KFold, cross_validate
+from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -647,73 +646,6 @@ class ElasticNetEstimator(EstimatorProtocol):
         return self._model
 
 
-class RidgeEstimator(EstimatorProtocol):
-    """Ridge regressor."""
-
-    def __init__(
-        self,
-        *,
-        species: Species,
-        group_by: str | None = None,
-        cv: int = 5,
-        **kwargs: Any,
-    ):
-        """Initialize the RidgeCV regressor."""
-        self.species = species
-        self.group_by = group_by
-        self.cv = cv
-        self.ridge_kwargs = kwargs.copy()
-
-        self._model = None
-
-    def get_params(self, deep: bool = True) -> dict[str, Any]:
-        """Get the parameters of the regressor."""
-        if self._model is None:
-            raise ValueError("Model has not been fitted yet.")
-
-        return self._model.get_params(deep=deep)
-
-    def set_params(self, **params: Any) -> RidgeEstimator:
-        """Set the parameters of the regressor."""
-        if self._model is None:
-            raise ValueError("Model has not been fitted yet.")
-
-        self._model.set_params(**params)
-        return self
-
-    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> RidgeEstimator:
-        """Fit the regressor to the training data."""
-        # Extract groups if provided
-        groups = kwargs.get("groups", None)
-
-        # Use RidgeCV for cross-validating the optimal alpha
-        ridge_cv = RidgeCV(
-            cv=GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv),
-            **self.ridge_kwargs,
-        )
-
-        ridge_cv.fit(X, y, groups=to_numpy(groups))
-        self._model = Ridge(alpha=ridge_cv.alpha_).fit(X, y)
-
-        return self
-
-    def predict(self, X: MatrixLike) -> VectorLike:
-        """Predict using the fitted regressor."""
-        if self._model is None:
-            raise ValueError("Model has not been fitted yet.")
-
-        return self._model.predict(X)
-
-    def get_sklearn(self) -> Ridge:
-        """Get the underlying Ridge regressor."""
-        if self._model is None:
-            raise ValueError("Model has not been fitted yet.")
-
-        return self._model
-
-
 @dataclass
 class ExperimentResults:
     """Results of an experiment.
@@ -1080,24 +1012,6 @@ def train_and_explain(
                 cv=cv,
             )
 
-        elif model_type == "ridge":
-            # Enable metadata routing for RidgeCV to handle group information
-            sklearn.set_config(enable_metadata_routing=True)
-
-            estimator = RidgeEstimator(
-                species=species,
-                group_by=group_by,
-                cv=cv,
-            )
-
-            # Input NaNs are not allowed in RidgeCV, so we need to impute them
-            X = X.fill_null(0)
-
-            # Standardize the features
-            X = pl.DataFrame(
-                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
-                schema=X.schema,
-            )
         else:
             raise ValueError(
                 f"Unknown estimator: {model_type}. Supported estimators are 'gbdt' and 'elasticnet'."
