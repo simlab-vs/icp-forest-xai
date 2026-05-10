@@ -5,7 +5,7 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import LassoCV, Lasso
+from sklearn.linear_model import LassoCV, Lasso, RidgeCV, Ridge
 
 import sklearn
 from sklearn.model_selection import KFold, GroupKFold, cross_validate
@@ -23,6 +23,7 @@ import os
 
 import numpy as np
 import polars as pl
+from scipy.stats import lognorm
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, Sequence, cast, overload
@@ -38,7 +39,7 @@ warnings.filterwarnings(
 )
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["gbdt", "lasso"]
+ModelType = Literal["gbdt", "lasso", "ridge"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -239,6 +240,7 @@ class LGBMEstimator(EstimatorProtocol):
         y: VectorLike,
         groups: VectorLike | None = None,
         ablation: Ablation = "all",
+        use_temporal_cv: bool = False,
         use_caching: bool = True,
     ) -> tuple[dict[str, Any], float]:
         """Optimize hyperparameters for a given species.
@@ -252,7 +254,11 @@ class LGBMEstimator(EstimatorProtocol):
         -------
         A tuple containing the best hyperparameters and the best value found.
         """
-        study_name = f"./cache/study-{self.species}-{self.group_by}-{ablation}.pkl"
+        if use_temporal_cv:
+            temporal_label = "with_temp_blocking"
+        else:
+            temporal_label = "without_temp_blocking"
+        study_name = f"./cache/study-{self.species}-{self.group_by}-{ablation}-{temporal_label}.pkl"
 
         # Check if the study has been cached
         if use_caching and os.path.exists(study_name):
@@ -458,6 +464,73 @@ class LassoEstimator(EstimatorProtocol):
         return self._model
 
 
+class RidgeEstimator(EstimatorProtocol):
+    """Ridge regressor."""
+
+    def __init__(
+        self,
+        *,
+        species: Species,
+        group_by: str | None = None,
+        cv: int = 5,
+        **kwargs: Any,
+    ):
+        """Initialize the RidgeCV regressor."""
+        self.species = species
+        self.group_by = group_by
+        self.cv = cv
+        self.ridge_kwargs = kwargs.copy()
+
+        self._model = None
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        """Get the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.get_params(deep=deep)
+
+    def set_params(self, **params: Any) -> RidgeEstimator:
+        """Set the parameters of the regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        self._model.set_params(**params)
+        return self
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> RidgeEstimator:
+        """Fit the regressor to the training data."""
+        # Extract groups if provided
+        groups = kwargs.get("groups", None)
+
+        # Use RidgeCV for cross-validating the optimal alpha
+        ridge_cv = RidgeCV(
+            cv=GroupKFold(n_splits=self.cv)
+            if self.group_by is not None
+            else KFold(n_splits=self.cv),
+            **self.ridge_kwargs,
+        )
+
+        ridge_cv.fit(X, y, groups=to_numpy(groups))
+        self._model = Ridge(alpha=ridge_cv.alpha_).fit(X, y)
+
+        return self
+
+    def predict(self, X: MatrixLike) -> VectorLike:
+        """Predict using the fitted regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model.predict(X)
+
+    def get_sklearn(self) -> Ridge:
+        """Get the underlying Ridge regressor."""
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+
+        return self._model
+
+
 @dataclass
 class ExperimentResults:
     """Results of an experiment.
@@ -503,8 +576,11 @@ class ExperimentResults:
     performances: Sequence[dict[str, float]]
 
     shap_values: Sequence[Explanation]
-
-    dist_params: tuple[float, float, float] | None = None
+    # Required for correct fold-to-SHAP alignment; adding this field is a breaking
+    # change — cached ExperimentResults pickled before this field was added must be
+    # regenerated (clear cache/ and re-run train-all.sh).
+    shap_row_indices: Sequence[np.ndarray]
+    dist_params: tuple[float | None, float | None, float | None] | None = None
 
     @property
     def num_folds(self) -> int:
@@ -516,9 +592,12 @@ class ExperimentResults:
 
     def get_indices(self, fold: int, split: Split) -> np.ndarray:
         """Get indices for the given fold and split."""
-        return (
-            self.indices[fold][split] if split != "all" else np.arange(self.X.shape[0])
-        )
+        if split == "all":
+            return np.concatenate(
+                [self.indices[fold]["train"], self.indices[fold]["test"]]
+            )
+        else:
+            return self.indices[fold][split]
 
     def get_data(
         self, fold: int, split: Split
@@ -565,10 +644,11 @@ class ExperimentResults:
                 f"No SHAP values available for fold {fold}. "
                 "Ensure that the model was trained with SHAP explanations."
             )
-
+        used_idx = self.shap_row_indices[fold]
         indices = self.get_indices(fold, split)
+        mask = np.isin(used_idx, indices)
 
-        return cast(Explanation, shap_values[indices])
+        return cast(Explanation, shap_values[mask])
 
     def get_shap_interactions(
         self, fold: int, split: Split = "test", num_samples: int | None = None
@@ -615,6 +695,96 @@ class ExperimentResults:
         )
 
         return interactions, indices
+
+    def get_inverse_transform(
+        self, y: pl.Series, dist_params: tuple[float | None, float | None, float | None]
+    ) -> pl.Series:
+        """
+        Get the inverse transform for the given y.
+
+        This is used to transform the y values back to the original scale of the target variable.
+
+        Parameters
+        ----------
+        y
+            The y values to transform.
+        dist_params
+            A tuple containing the shape, location, and scale parameters of the log-normal distribution.
+
+        Returns
+        -------
+        The inverse transform for the given y.
+        """
+        shape, loc, scale = dist_params
+        if shape is None or loc is None or scale is None:
+            raise ValueError("dist_params contains None; cannot inverse transform.")
+        # Clip away exact 0/1 to avoid lognorm.ppf returning -inf/+inf at the CDF boundaries.
+        y_orig = pl.Series(
+            lognorm.ppf(
+                np.clip(to_numpy(y), 1e-6, 1 - 1e-6),
+                s=shape,
+                loc=loc,
+                scale=scale,
+            )
+            - 1
+        )
+
+        return y_orig
+
+    def get_shap_values_orig_space(
+        self, fold: int, split: Split = "test"
+    ) -> pl.DataFrame:
+        """
+        Get SHAP values in the original space of the target variable for the given fold.
+
+        Parameters
+        ----------
+        fold
+            Fold index.
+        split
+            Split type ('train', 'test', or 'all').
+
+        Returns
+        -------
+        SHAP values in the original space.
+        """
+
+        X, y_true, y_pred = self.get_data(fold, split)
+        shap_values = self.shap_values[fold].values
+        base_values = self.shap_values[fold].base_values
+        used_idx = self.shap_row_indices[fold]
+        indices = self.get_indices(fold, split)
+        mask = np.isin(used_idx, indices)
+
+        if self.dist_params is None:
+            raise ValueError(
+                "dist_params is None. Cannot compute importance in original space."
+            )
+
+        u_pred = base_values + shap_values.sum(axis=1)
+        u_pred = u_pred[mask]
+        # Check if SHAP reconstructs predictions
+        if not np.allclose(u_pred, y_pred, rtol=1e-6, atol=1e-6):
+            max_abs_err = np.max(np.abs(u_pred - y_pred))
+            mean_abs_err = np.mean(np.abs(u_pred - y_pred))
+
+            logging.warning(
+                f"{self.species} fold {fold}: "
+                f"u_pred != y_pred "
+                f"(max abs err={max_abs_err:.6g}, "
+                f"mean abs err={mean_abs_err:.6g})"
+            )
+
+        y_pred_orig = to_numpy(self.get_inverse_transform(y_pred, self.dist_params))
+        u_without = u_pred[:, None] - shap_values[mask]
+        n_samples, n_features = u_without.shape
+        y_without = to_numpy(
+            self.get_inverse_transform(pl.Series(u_without.ravel()), self.dist_params)
+        ).reshape(n_samples, n_features)
+        assert y_without.shape == u_without.shape
+        delta_abs = y_pred_orig[:, None] - y_without
+
+        return pl.DataFrame(delta_abs, schema=self.features)
 
 
 @dataclass
@@ -667,6 +837,11 @@ def train_and_explain(
     X, y, dist_params = prepare_data(df, ablation)
     shape, loc, scale = dist_params
 
+    if group_by == "plot_id":
+        use_temporal_cv = (
+            False  # Temporal CV is not compatible with plot-level grouping
+        )
+
     # Prepare groups
     if group_by is not None:
         groups = df.select(group_by).to_series()
@@ -677,7 +852,9 @@ def train_and_explain(
     if use_temporal_cv:
         from HierarchicalTemporalGroupCV import HierarchicalTimeGroupCV
 
-        temporal_cv = HierarchicalTimeGroupCV(log_level=logging.ERROR)
+        temporal_cv = HierarchicalTimeGroupCV(
+            log_level=logging.ERROR,
+        )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
             temporal_cv.run_cross_validation(species=species, ablation=ablation)
@@ -727,9 +904,28 @@ def train_and_explain(
                 sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
                 schema=X.schema,
             )
+
+        elif model_type == "ridge":
+            # Enable metadata routing for RidgeCV to handle group information
+            sklearn.set_config(enable_metadata_routing=True)
+
+            estimator = RidgeEstimator(
+                species=species,
+                group_by=group_by,
+                cv=cv,
+            )
+
+            # Input NaNs are not allowed in RidgeCV, so we need to impute them
+            X = X.fill_null(0)
+
+            # Standardize the features
+            X = pl.DataFrame(
+                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
+                schema=X.schema,
+            )
         else:
             raise ValueError(
-                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm' and 'lasso'."
+                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm', 'lasso', and 'ridge'."
             )
 
         print(f"Fold {fold + 1}/{cv}")
@@ -779,10 +975,17 @@ def train_and_explain(
     # Create SHAP explainers for the trained models
     explainers = []
     shap_values = []
+    shap_row_indices = []
 
     X_background = X.sample(1000, with_replacement=False)
 
-    for estimator in results.estimator:
+    for fold, estimator in enumerate(results.estimator):
+        train_idx = results.indices["train"][fold].to_numpy()
+        test_idx = results.indices["test"][fold].to_numpy()
+        # Since some data will be lost use temporal blocking
+        used_idx = np.concatenate([train_idx, test_idx])
+        X_used = X[used_idx]
+
         # Create a SHAP explainer for the LGBM model
         if isinstance(estimator, LGBMEstimator):
             explainer = TreeExplainer(
@@ -790,7 +993,7 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, LassoEstimator):
+        elif isinstance(estimator, LassoEstimator | RidgeEstimator):
             explainer = LinearExplainer(
                 estimator.get_sklearn(),
                 feature_names=X.columns,
@@ -803,7 +1006,8 @@ def train_and_explain(
             )
 
         explainers.append(explainer)
-        shap_values.append(explainer(X.to_numpy()))
+        shap_values.append(explainer(X_used.to_numpy()))
+        shap_row_indices.append(used_idx)
 
     return ExperimentResults(
         species=species,
@@ -834,4 +1038,5 @@ def train_and_explain(
         ],
         shap_values=shap_values,
         dist_params=dist_params,
+        shap_row_indices=shap_row_indices,
     )
