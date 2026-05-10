@@ -576,8 +576,10 @@ class ExperimentResults:
     performances: Sequence[dict[str, float]]
 
     shap_values: Sequence[Explanation]
+    # Required for correct fold-to-SHAP alignment; adding this field is a breaking
+    # change — cached ExperimentResults pickled before this field was added must be
+    # regenerated (clear cache/ and re-run train-all.sh).
     shap_row_indices: Sequence[np.ndarray]
-    # dist_params: tuple[float, float, float] | None = None
     dist_params: tuple[float | None, float | None, float | None] | None = None
 
     @property
