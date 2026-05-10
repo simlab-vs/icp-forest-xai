@@ -455,7 +455,7 @@ def _(
         y="feature",
         hue="species",
         kind="bar",
-        palette=sns.color_palette("cmo.thermal", n_colors=_n_species + 1),
+        palette=sns.color_palette("plasma", n_colors=_n_species + 1),
         height=8,
         aspect=0.6,
     )
