@@ -1037,13 +1037,3 @@ def train_and_explain(
         dist_params=dist_params,
         shap_row_indices=shap_row_indices,
     )
-
-
-if __name__ == "__main__":
-    train_and_explain(
-        species="spruce",
-        model_type="ridge",
-        ablation="all",
-        group_by="tree_id",
-        use_temporal_cv=True,
-    )
