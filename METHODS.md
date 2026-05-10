@@ -58,8 +58,9 @@ test:
    1 × 10⁻⁴ after imputation are dropped
    (`VarianceThreshold(threshold=1e-4)`).
 
-4. **Standardisation** — features are centred and scaled to unit
-   variance (`StandardScaler`).
+4. **Robust scaling** — features are centred by median and scaled by
+   interquartile range (`RobustScaler`), which limits the influence of
+   outliers on the regularisation path.
 
 ### 3.2 Hyperparameter selection
 
