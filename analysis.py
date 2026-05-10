@@ -3,8 +3,7 @@ import numpy as np
 import polars as pl
 import polars.selectors as cs
 
-from models import ExperimentResults, Species, ModelType, ALL_SPECIES
-from config import Ablation
+from models import ExperimentResults, Species, ALL_SPECIES
 
 
 def check_significance(metric: str, k: int = 5) -> str:
@@ -16,10 +15,11 @@ def check_significance(metric: str, k: int = 5) -> str:
 
     # Perform a t-test to check if the R2/rmse value is significantly positive
     standard_error = float(metric_error) / np.sqrt(k)
-    t_statistic = float(metric_value) / standard_error
-
-    # Calculate the p-value
-    p_value = stats.t.sf(t_statistic, k - 1)
+    if standard_error == 0:
+        p_value = 0.0 if float(metric_value) > 0 else 1.0
+    else:
+        t_statistic = float(metric_value) / standard_error
+        p_value = stats.t.sf(t_statistic, k - 1)
 
     if p_value < 0.001:
         return f"{metric_value} ± {metric_error}***"
@@ -37,12 +37,12 @@ PERF_KEYS = ["group_by", "model", "split", "ablation", "temporal_cv"]
 
 def summarize_performance(
     all_results: dict[Species, ExperimentResults],
-    ablation: Ablation,
-    model_type: ModelType,
+    ablation: str,
+    model_type: str,
+    use_temporal_cv: bool,
     group_col: str,
-    use_temporal_cv=False,
     precision: int = 2,
-) -> None:
+) -> pl.DataFrame:
     perf = pl.concat(
         [
             pl.from_dicts(results.performances).select(
@@ -134,51 +134,39 @@ def summarize_performance(
 
     perf.write_csv(PERF_CSV)
 
-    with pl.Config() as cfg:
-        cfg.set_tbl_formatting("ASCII_MARKDOWN")
-        cfg.set_tbl_width_chars(125)
-        cfg.set_tbl_hide_column_data_types(True)
+    weighted = (
+        perf.filter(pl.col("group_by") == group_col)
+        .filter(pl.col("split").str.contains("weight"))
+        .filter(pl.col("split").str.starts_with("test"))
+        .with_columns(
+            weighted=pl.sum_horizontal(
+                cs.by_name("spruce", "pine", "beech", "oak").cast(pl.Float64)
+            ).round(2),
+        )
+        .select(cs.all().exclude("group_by"))
+    )
 
-        for group_by in perf["group_by"].unique().sort():
-            if use_temporal_cv:
-                temporal_str = "with temporal blocking"
-            else:
-                temporal_str = "without temporal blocking"
-            print(f"\nPerformance summary for group_by='{group_by}' {temporal_str}:")
+    weighted = weighted.select(["ablation", "model", "split", "weighted"]).with_columns(
+        pl.col("split").str.replace("_weight", "").alias("split")
+    )
 
-            weighted = (
-                perf.filter(pl.col("group_by") == group_by)
-                .filter(pl.col("split").str.contains("weight"))
-                .filter(pl.col("split").str.starts_with("test"))
-                .with_columns(
-                    weighted=pl.sum_horizontal(
-                        cs.by_name("spruce", "pine", "beech", "oak").cast(pl.Float64)
-                    ).round(2),
-                )
-                .select(cs.all().exclude("group_by"))
+    return (
+        perf.filter(pl.col("group_by") == group_col)
+        .filter(pl.col("split").str.starts_with("test"))
+        .filter(~pl.col("split").str.contains("weight"))
+        .with_columns(
+            mean_metric=pl.mean_horizontal(
+                cs.by_name("spruce", "pine", "beech", "oak")
+                .str.split(" ± ")
+                .list.get(0)
+                .cast(pl.Float64)
+            ).round(2),
+        )
+        .with_columns(
+            cs.by_name("spruce", "pine", "beech", "oak").map_elements(
+                lambda x: check_significance(x, k=5), return_dtype=pl.Utf8
             )
-
-            weighted = weighted.select(
-                ["ablation", "model", "split", "weighted"]
-            ).with_columns(pl.col("split").str.replace("_weight", "").alias("split"))
-
-            print(
-                perf.filter(pl.col("group_by") == group_by)
-                .filter(pl.col("split").str.starts_with("test"))
-                .filter(~pl.col("split").str.contains("weight"))
-                .with_columns(
-                    mean_metric=pl.mean_horizontal(
-                        cs.by_name("spruce", "pine", "beech", "oak")
-                        .str.split(" ± ")
-                        .list.get(0)
-                        .cast(pl.Float64)
-                    ).round(2),
-                )
-                .with_columns(
-                    cs.by_name("spruce", "pine", "beech", "oak").map_elements(
-                        lambda x: check_significance(x, k=5), return_dtype=pl.Utf8
-                    )
-                )
-                .select(cs.all().exclude("group_by"))
-                .join(weighted, on=["ablation", "model", "split"], how="left")
-            )
+        )
+        .select(cs.all().exclude("group_by"))
+        .join(weighted, on=["ablation", "model", "split"], how="left")
+    )

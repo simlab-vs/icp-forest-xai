@@ -5,11 +5,16 @@ import sklearn.preprocessing
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
-from sklearn.linear_model import LassoCV, Lasso, RidgeCV, Ridge
+from sklearn.linear_model import ElasticNet, ElasticNetCV, Ridge, RidgeCV
+from sklearn.feature_selection import VarianceThreshold
 
 import sklearn
-from sklearn.model_selection import KFold, GroupKFold, cross_validate
+from sklearn.model_selection import GroupKFold, KFold, cross_validate
 from sklearn.metrics import mean_squared_error, make_scorer, root_mean_squared_error
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import RobustScaler
+
 from shap import TreeExplainer, Explanation, LinearExplainer, Explainer
 from shap.maskers import Independent as IndependentMasker
 import joblib
@@ -39,7 +44,7 @@ warnings.filterwarnings(
 )
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["gbdt", "lasso", "ridge"]
+ModelType = Literal["gbdt", "elasticnet"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -49,10 +54,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-RANDOM_STATE = 42  # Global random state for reproducibility
+RANDOM_STATE = 42
 ALL_SPECIES: list[Species] = ["spruce", "pine", "beech", "oak"]
-
-np.random.seed(RANDOM_STATE)  # Set the global random seed for NumPy
 
 
 # This is a hack to suppress stderr output from LightGBM
@@ -79,7 +82,7 @@ def to_numpy(data: MatrixLike | VectorLike | None) -> np.ndarray | None:
     if data is None:
         return None
     if isinstance(data, pl.DataFrame):
-        return data.to_numpy()
+        return data.cast(pl.Float64).to_numpy()
     elif isinstance(data, pl.Series):
         return data.to_numpy()
     elif isinstance(data, np.ndarray):
@@ -87,6 +90,28 @@ def to_numpy(data: MatrixLike | VectorLike | None) -> np.ndarray | None:
     else:
         raise TypeError(
             f"Unsupported data type: {type(data)}. Expected DataFrame or Series."
+        )
+
+
+def to_pandas(data: MatrixLike) -> Any:
+    """Convert a matrix to a pandas DataFrame, preserving column names.
+
+    Used for LightGBM fit/predict so that feature_names_in_ stays consistent
+    and sklearn does not emit 'X does not have valid feature names' warnings.
+    LightGBM 4.x auto-assigns Column_0…N when fitted with numpy, then warns
+    on every numpy predict because the names don't match.
+    """
+    import pandas as pd
+
+    if isinstance(data, pl.DataFrame):
+        return data.cast(pl.Float64).to_pandas()
+    elif isinstance(data, pd.DataFrame):
+        return data
+    elif isinstance(data, np.ndarray):
+        return pd.DataFrame(data)
+    else:
+        raise TypeError(
+            f"Unsupported data type: {type(data)}. Expected DataFrame or ndarray."
         )
 
 
@@ -180,7 +205,7 @@ class LGBMEstimator(EstimatorProtocol):
         self,
         *,
         species: Species,
-        group_by: str | None,
+        group_by: str,
         cv: int = 5,
         n_jobs: int = -1,
         random_state: int | None = RANDOM_STATE,
@@ -204,6 +229,7 @@ class LGBMEstimator(EstimatorProtocol):
 
         self.num_iter = 100
         self.verbosity = verbosity
+        self.best_params_: dict[str, Any] = {}
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -328,13 +354,11 @@ class LGBMEstimator(EstimatorProtocol):
 
             results = cross_validate(
                 estimator=estimator,
-                X=to_numpy(X),
+                X=to_pandas(X),
                 y=to_numpy(y),
                 groups=to_numpy(groups),
                 scoring=make_scorer(r2_score),
-                cv=KFold(n_splits=self.cv)
-                if self.group_by is None
-                else GroupKFold(n_splits=self.cv),
+                cv=GroupKFold(n_splits=self.cv),
                 n_jobs=self.n_jobs,
             )
 
@@ -343,7 +367,10 @@ class LGBMEstimator(EstimatorProtocol):
 
             return results["test_r2"].mean()
 
-        study = optuna.create_study(direction="maximize")
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=self.random_state),
+        )
         with suppress_stderr():
             study.optimize(objective_fn, n_trials=self.num_iter)
 
@@ -364,30 +391,28 @@ class LGBMEstimator(EstimatorProtocol):
         groups = kwargs.get("groups", None)
         ablation = kwargs.get("ablation", "all")
 
-        if self.group_by is not None and groups is None:
-            raise ValueError(
-                "Group information is required for cross-validation with group_by."
-            )
+        if groups is None:
+            raise ValueError("Group information is required for cross-validation.")
 
         # Optimize hyperparameters if not already done
         best_params, _ = self.optimize_hyperparameters(
             X, y, ablation=ablation, groups=groups, use_caching=True
         )
 
+        self.best_params_ = dict(best_params)
         self._lgbm.set_params(**best_params)
         best_params.setdefault("verbosity", self.verbosity)
 
-        # Fit the model using LightGBM
-        self._lgbm.fit(
-            to_numpy(X) if isinstance(X, pl.DataFrame) else X,
-            to_numpy(y) if isinstance(y, pl.Series) else y,
-        )
+        self._lgbm.fit(to_pandas(X), to_numpy(y))
 
         return self
 
     def predict(self, X: MatrixLike) -> VectorLike:
         """Predict using the fitted regressor."""
-        return self._lgbm.predict(to_numpy(X))  # type: ignore[return-value]
+        return self._lgbm.predict(to_pandas(X))  # type: ignore[return-value]
+
+    def get_hyperparams(self) -> dict[str, Any]:
+        return dict(self.best_params_)
 
     def get_lgbm(self) -> LGBMRegressor:
         """Get the underlying LightGBM regressor."""
@@ -396,24 +421,52 @@ class LGBMEstimator(EstimatorProtocol):
         return self._lgbm
 
 
-class LassoEstimator(EstimatorProtocol):
-    """Lasso regressor."""
+class MissingnessFilter:
+    """Drop columns whose missing rate in the training data exceeds `threshold`."""
+
+    def __init__(self, threshold: float = 0.5) -> None:
+        self.threshold = threshold
+        self.mask_: np.ndarray = np.array([], dtype=bool)
+
+    def fit(self, X: np.ndarray, y: Any = None) -> MissingnessFilter:
+        self.mask_ = np.isnan(X).mean(axis=0) <= self.threshold
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return X[:, self.mask_]
+
+    def fit_transform(self, X: np.ndarray, y: Any = None) -> np.ndarray:
+        return self.fit(X).transform(X)
+
+    def get_support(self) -> np.ndarray:
+        return self.mask_
+
+
+class ElasticNetEstimator(EstimatorProtocol):
+    """ElasticNet regressor with cross-validated hyperparameter selection."""
 
     def __init__(
         self,
         *,
         species: Species,
-        group_by: str | None = None,
+        group_by: str,
         cv: int = 5,
+        random_state: int | None = RANDOM_STATE,
         **kwargs: Any,
     ):
-        """Initialize the LassoCV regressor."""
+        """Initialize the ElasticNet regressor."""
         self.species = species
         self.group_by = group_by
         self.cv = cv
-        self.lasso_kwargs = kwargs.copy()
+        self.random_state = random_state
+        self.elasticnet_kwargs = kwargs.copy()
 
+        self._miss_filter: MissingnessFilter | None = None
+        self._preprocessor = None
         self._model = None
+        self._var_mask: np.ndarray | None = None
+        self._y_min: float = -np.inf
+        self._y_max: float = np.inf
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Get the parameters of the regressor."""
@@ -422,7 +475,7 @@ class LassoEstimator(EstimatorProtocol):
 
         return self._model.get_params(deep=deep)
 
-    def set_params(self, **params: Any) -> LassoEstimator:
+    def set_params(self, **params: Any) -> ElasticNetEstimator:
         """Set the parameters of the regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
@@ -430,22 +483,138 @@ class LassoEstimator(EstimatorProtocol):
         self._model.set_params(**params)
         return self
 
-    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> LassoEstimator:
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> ElasticNetEstimator:
         """Fit the regressor to the training data."""
-        # Extract groups if provided
         groups = kwargs.get("groups", None)
+        fold: int | None = kwargs.get("fold", None)
+        feature_names = list(X.columns) if isinstance(X, pl.DataFrame) else None
+        tag = f"{self.species}|fold={fold}" if fold is not None else self.species
 
-        # Use LassoCV for cross-validating the optimal alpha
-        lasso_cv = LassoCV(
-            cv=GroupKFold(n_splits=self.cv)
-            if self.group_by is not None
-            else KFold(n_splits=self.cv),
-            verbose=False,
-            **self.lasso_kwargs,
+        X_np = to_numpy(X).astype(float)
+        y_arr = to_numpy(y).astype(float)
+        self._y_min, self._y_max = float(y_arr.min()), float(y_arr.max())
+
+        # Log per-feature missing rates (before imputation)
+        if feature_names is not None:
+            miss_rate = np.isnan(X_np).mean(axis=0)
+            high_miss = [
+                (f, float(r)) for f, r in zip(feature_names, miss_rate) if r > 0.5
+            ]
+            if high_miss:
+                logging.info(
+                    "[%s] %d feature(s) with >50%% missing: %s",
+                    tag,
+                    len(high_miss),
+                    ", ".join(f"{f}={r:.0%}" for f, r in high_miss),
+                )
+
+        # Step 1: drop features with >50% missing *before* imputation.
+        # VarianceThreshold alone won't catch these: a feature that is 80% missing
+        # still has real variance in the observed 20%, survives the threshold, then
+        # gets imputed to a training-fold constant — causing test-time distribution
+        # shift when the temporal test fold has different missingness patterns.
+        self._miss_filter = MissingnessFilter(threshold=0.5)
+        X_np_filtered = self._miss_filter.fit_transform(X_np)
+        miss_mask = self._miss_filter.get_support()
+        if feature_names is not None:
+            dropped_miss = [f for f, keep in zip(feature_names, miss_mask) if not keep]
+            if dropped_miss:
+                logging.info(
+                    "[%s] Dropped %d high-missingness feature(s) (>50%%): %s",
+                    tag,
+                    len(dropped_miss),
+                    dropped_miss,
+                )
+
+        # Step 2: impute → drop near-zero variance → standardise on the filtered matrix
+        self._preprocessor = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                ("var_threshold", VarianceThreshold(threshold=1e-4)),
+                ("scaler", RobustScaler()),
+            ]
         )
 
-        lasso_cv.fit(X, y, groups=to_numpy(groups))
-        self._model = Lasso(alpha=lasso_cv.alpha_).fit(X, y)
+        self._preprocessor.fit(X_np_filtered)
+        X_proc = self._preprocessor.transform(X_np_filtered).astype(float)
+
+        # Combine both masks so _var_mask indexes into the *original* feature space
+        var_mask_partial = self._preprocessor.named_steps["var_threshold"].get_support()
+        full_mask = np.zeros(X_np.shape[1], dtype=bool)
+        full_mask[miss_mask] = var_mask_partial
+        self._var_mask = full_mask
+        if feature_names is not None:
+            kept_after_miss = [f for f, keep in zip(feature_names, miss_mask) if keep]
+            dropped_var = [
+                f for f, keep in zip(kept_after_miss, var_mask_partial) if not keep
+            ]
+            if dropped_var:
+                logging.info(
+                    "[%s] Dropped %d near-zero variance feature(s): %s",
+                    tag,
+                    len(dropped_var),
+                    dropped_var,
+                )
+
+        cond = float(np.linalg.cond(X_proc))
+        logging.info(
+            "[%s] Design matrix: shape=%s, cond=%.2e",
+            tag,
+            X_proc.shape,
+            cond,
+        )
+
+        # Pre-compute splits so ElasticNetCV.fit() never needs a groups= kwarg
+        groups_arr = to_numpy(groups)
+        splitter = GroupKFold(n_splits=self.cv)
+        cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
+
+        en_cv = ElasticNetCV(
+            l1_ratio=[0.5, 0.7, 0.9, 0.95, 0.99],
+            alphas=np.logspace(-2, 2, 100),
+            eps=1e-2,
+            cv=cv_splits,
+            max_iter=100_000,
+            random_state=self.random_state,
+            verbose=False,
+        )
+        en_cv.fit(X_proc, y_arr)
+        alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
+
+        # Log per-fold CV MSE at the selected (alpha, l1_ratio) to spot bad folds
+        l1_idx = int(np.argmin(np.abs(np.atleast_1d(en_cv.l1_ratio) - l1_ratio)))
+        alpha_idx = int(np.argmin(np.abs(en_cv.alphas_[l1_idx] - alpha)))
+        fold_mses = en_cv.mse_path_[l1_idx][alpha_idx]
+        logging.info(
+            "[%s] CV selected alpha=%.6f, l1_ratio=%.2f | fold MSEs: %s",
+            tag,
+            alpha,
+            l1_ratio,
+            " ".join(f"{v:.4f}" for v in fold_mses),
+        )
+
+        en = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=100_000)
+        en.fit(X_proc, y_arr)
+
+        coef = en.coef_
+        n_nonzero = int(np.sum(np.abs(coef) > 1e-6))
+        max_coef = float(np.max(np.abs(coef)))
+        if feature_names is not None:
+            kept_names = [f for f, keep in zip(feature_names, self._var_mask) if keep]
+            top_idx = np.argsort(np.abs(coef))[::-1][:5]
+            top = [(kept_names[i], float(coef[i])) for i in top_idx]
+            top_str = ", ".join(f"{f}={v:+.4f}" for f, v in top)
+        else:
+            top_str = "(feature names unavailable)"
+        logging.info(
+            "[%s] Coefficients: n_nonzero=%d, max|coef|=%.4f | top-5: %s",
+            tag,
+            n_nonzero,
+            max_coef,
+            top_str,
+        )
+
+        self._model = en
 
         return self
 
@@ -453,11 +622,25 @@ class LassoEstimator(EstimatorProtocol):
         """Predict using the fitted regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
+        return np.clip(self._model.predict(self.transform(X)), self._y_min, self._y_max)
 
-        return self._model.predict(X)
+    def transform(self, X: MatrixLike) -> np.ndarray:
+        """Apply the full preprocessing stack (missingness filter → impute → variance filter → scale)."""
+        if self._preprocessor is None or self._miss_filter is None:
+            raise ValueError("Model has not been fitted yet.")
+        X_np = to_numpy(X).astype(float)
+        return self._preprocessor.transform(self._miss_filter.transform(X_np))
 
-    def get_sklearn(self) -> Lasso:
-        """Get the underlying Lasso regressor."""
+    def get_hyperparams(self) -> dict[str, Any]:
+        if self._model is None:
+            raise ValueError("Model has not been fitted yet.")
+        return {
+            "alpha": float(self._model.alpha),
+            "l1_ratio": float(self._model.l1_ratio),
+        }
+
+    def get_sklearn(self) -> ElasticNet:
+        """Get the underlying ElasticNet regressor."""
         if self._model is None:
             raise ValueError("Model has not been fitted yet.")
 
@@ -541,6 +724,8 @@ class ExperimentResults:
         Species for which the experiment was run.
     ablation
         Ablation study performed on the model.
+    temporal_blocking
+        Whether temporal blocking was used.
     X
         Dataframe containing the features.
     metadata
@@ -563,6 +748,7 @@ class ExperimentResults:
 
     species: Species
     ablation: Ablation
+    temporal_blocking: bool
 
     X: pl.DataFrame
     metadata: pl.DataFrame
@@ -804,7 +990,7 @@ def train_and_explain(
     *,
     model_type: ModelType,
     ablation: Ablation = "all",
-    group_by: str | None,
+    group_by: str,
     cv: int = 5,
     n_jobs: int = -1,
     use_temporal_cv: bool = False,
@@ -816,7 +1002,7 @@ def train_and_explain(
     species
         Species to train the model for.
     model_type
-        Type of model to use for training, either "gbdt" or "lasso".
+        Type of model to use for training, either "gbdt" or "elasticnet".
     group_by
         Column to group by for cross-validation.
     cv
@@ -835,7 +1021,6 @@ def train_and_explain(
 
     # Prepare data
     X, y, dist_params = prepare_data(df, ablation)
-    shape, loc, scale = dist_params
 
     if group_by == "plot_id":
         use_temporal_cv = (
@@ -843,10 +1028,7 @@ def train_and_explain(
         )
 
     # Prepare groups
-    if group_by is not None:
-        groups = df.select(group_by).to_series()
-    else:
-        groups = None
+    groups = df.select(group_by).to_series()
 
     # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
     if use_temporal_cv:
@@ -857,14 +1039,17 @@ def train_and_explain(
         )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
-            temporal_cv.run_cross_validation(species=species, ablation=ablation)
+            temporal_cv.run_cross_validation(
+                species=species,
+                ablation=ablation,
+                tree_group=group_by,
+            )
         ):
             splits.append((train_idx, test_idx))
     else:
         splits = []
-        splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
         for fold, (train_idx, test_idx) in enumerate(
-            splitter.split(to_numpy(X), y, groups=to_numpy(groups))
+            GroupKFold(n_splits=cv).split(to_numpy(X), y, groups=to_numpy(groups))
         ):
             splits.append((train_idx, test_idx))
 
@@ -872,8 +1057,12 @@ def train_and_explain(
     print(f"Starting cross-validation for {species} with {model_type} estimator...")
 
     results = CrossValidationResults()
-    # splitter = GroupKFold(n_splits=cv) if group_by else KFold(n_splits=cv)
+
     for fold, (train_idx, test_idx) in enumerate(splits):
+        # Split data into training and test sets
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
         # Create estimator
         if model_type == "gbdt":
             sklearn.set_config(enable_metadata_routing=False)
@@ -884,25 +1073,11 @@ def train_and_explain(
                 cv=cv,
                 n_jobs=n_jobs,
             )
-        elif model_type == "lasso":
-            # Enable metadata routing for LassoCV to handle group information
-            sklearn.set_config(enable_metadata_routing=True)
-
-            estimator = LassoEstimator(
+        elif model_type == "elasticnet":
+            estimator = ElasticNetEstimator(
                 species=species,
                 group_by=group_by,
                 cv=cv,
-                n_jobs=n_jobs,
-                max_iter=25000,
-            )
-
-            # Input NaNs are not allowed in LassoCV, so we need to impute them
-            X = X.fill_null(0)
-
-            # Standardize the features
-            X = pl.DataFrame(
-                sklearn.preprocessing.StandardScaler().fit_transform(to_numpy(X)),
-                schema=X.schema,
             )
 
         elif model_type == "ridge":
@@ -925,14 +1100,10 @@ def train_and_explain(
             )
         else:
             raise ValueError(
-                f"Unknown estimator: {model_type}. Supported estimators are 'lgbm', 'lasso', and 'ridge'."
+                f"Unknown estimator: {model_type}. Supported estimators are 'gbdt' and 'elasticnet'."
             )
 
         print(f"Fold {fold + 1}/{cv}")
-
-        # Split data into training and test sets
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
 
         # Fit the model
         estimator.fit(
@@ -940,6 +1111,7 @@ def train_and_explain(
             y_train,
             groups=to_numpy(groups[train_idx]) if groups is not None else None,
             ablation=ablation,
+            fold=fold,
         )
 
         # Evaluate the model
@@ -982,10 +1154,6 @@ def train_and_explain(
     for fold, estimator in enumerate(results.estimator):
         train_idx = results.indices["train"][fold].to_numpy()
         test_idx = results.indices["test"][fold].to_numpy()
-        # Since some data will be lost use temporal blocking
-        used_idx = np.concatenate([train_idx, test_idx])
-        X_used = X[used_idx]
-
         # Create a SHAP explainer for the LGBM model
         if isinstance(estimator, LGBMEstimator):
             explainer = TreeExplainer(
@@ -993,25 +1161,51 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, LassoEstimator | RidgeEstimator):
+        elif isinstance(estimator, ElasticNetEstimator):
+            X_bg_proc = estimator.transform(X_background)
+            X_proc = estimator.transform(X)
+            mask = estimator._var_mask
+            feat_names_proc = (
+                [f for f, keep in zip(X.columns, mask) if keep]
+                if mask is not None
+                else X.columns
+            )
             explainer = LinearExplainer(
                 estimator.get_sklearn(),
-                feature_names=X.columns,
-                masker=IndependentMasker(to_numpy(X_background)),
+                feature_names=feat_names_proc,
+                masker=IndependentMasker(X_bg_proc),
+            )
+            raw = explainer(X_proc)
+            assert isinstance(raw, Explanation)
+            # Pad SHAP values back to the original feature space (zeros for dropped features)
+            n_orig = len(X.columns)
+            padded = np.zeros((len(X), n_orig))
+            if mask is not None:
+                padded[:, mask] = raw.values
+            else:
+                padded = raw.values
+            shap_values.append(
+                Explanation(
+                    padded,
+                    base_values=raw.base_values,
+                    data=X.to_numpy(),
+                    feature_names=list(X.columns),
+                )
             )
         else:
             raise ValueError(
                 f"Unsupported estimator type: {type(estimator)}. "
-                "Supported types are LGBMEstimator and LassoEstimator."
+                "Supported types are LGBMEstimator and ElasticNetEstimator."
             )
 
         explainers.append(explainer)
-        shap_values.append(explainer(X_used.to_numpy()))
-        shap_row_indices.append(used_idx)
+        if not isinstance(estimator, ElasticNetEstimator):
+            shap_values.append(explainer(X.to_numpy()))
 
     return ExperimentResults(
         species=species,
         ablation=ablation,
+        temporal_blocking=use_temporal_cv,
         X=X,
         metadata=df.select(pl.selectors.exclude(*X.columns)),
         y_true=y,
