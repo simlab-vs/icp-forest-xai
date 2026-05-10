@@ -774,9 +774,11 @@ class ExperimentResults:
 
         y_pred_orig = to_numpy(self.get_inverse_transform(y_pred, self.dist_params))
         u_without = u_pred[:, None] - shap_values[mask]
+        n_samples, n_features = u_without.shape
         y_without = to_numpy(
-            self.get_inverse_transform(pl.Series(u_without), self.dist_params)
-        )
+            self.get_inverse_transform(pl.Series(u_without.ravel()), self.dist_params)
+        ).reshape(n_samples, n_features)
+        assert y_without.shape == u_without.shape
         delta_abs = y_pred_orig[:, None] - y_without
 
         return pl.DataFrame(delta_abs, schema=self.features)
