@@ -748,6 +748,7 @@ class MixedLMEstimator(EstimatorProtocol):
         self.var_random: float | None = None
         self.var_resid: float | None = None
         self.icc: float | None = None
+        self.plot_blup_: dict[str, float] = {}
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         if self._result is None:
@@ -866,16 +867,49 @@ class MixedLMEstimator(EstimatorProtocol):
         )
         logging.info("[%s] Top-5 fixed effects: %s", tag, top_str)
 
+        # BLUPs (in standardised target space): û_j from statsmodels random_effects
+        self.plot_blup_ = {
+            str(plot_id): float(re.iloc[0])
+            for plot_id, re in result.random_effects.items()
+        }
+        logging.info(
+            "[%s] BLUP: stored random intercepts for %d training plots",
+            tag,
+            len(self.plot_blup_),
+        )
+
         self._result = result
         return self
 
-    def predict(self, X: MatrixLike) -> np.ndarray:
-        """Predict using fixed effects only (zero random intercept for unseen plots)."""
+    def predict(
+        self, X: MatrixLike, plot_groups: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Predict using fixed effects plus optional per-plot BLUP adjustment.
+
+        Parameters
+        ----------
+        plot_groups
+            Plot identifier for each row.  When provided, the BLUP û_j estimated
+            during training is added for every plot seen in the training fold.
+            Observations whose plot was not in training receive û_j = 0
+            (population-level prediction).  Pass None to always use fixed effects
+            only (e.g. for SHAP attribution, which must reconstruct y_pred
+            without the random-intercept term).
+        """
         if self._result is None:
             raise ValueError("Model has not been fitted yet.")
         X_proc = self.transform(X)
         X_with_const = np.column_stack([np.ones(len(X_proc)), X_proc])
         y_std_pred = X_with_const @ self._result.fe_params.values
+
+        if plot_groups is not None and self.plot_blup_:
+            blup_adj = np.fromiter(
+                (self.plot_blup_.get(str(p), 0.0) for p in plot_groups),
+                dtype=float,
+                count=len(plot_groups),
+            )
+            y_std_pred = y_std_pred + blup_adj
+
         return np.clip(
             y_std_pred * self._y_std + self._y_mean, self._y_min, self._y_max
         )
@@ -1296,11 +1330,25 @@ def train_and_explain(
             fold=fold,
         )
 
-        # Evaluate the model
-        r2_train = estimator.score(X_train, y_train)
-        r2_test = estimator.score(X_test, y_test)
-        rmse_train = estimator.rmse(X_train, y_train)
-        rmse_test = estimator.rmse(X_test, y_test)
+        # Evaluate the model.
+        # For LMM with tree-wise CV the same plot can appear in both train and
+        # test (different trees), so we add the per-plot BLUP to predictions.
+        # SHAP and y_pred storage always use fixed effects only (predict without
+        # plot_groups) so that LinearExplainer attribution remains consistent.
+        if isinstance(estimator, MixedLMEstimator) and group_by == "tree_id":
+            _pg_train = to_numpy(plot_groups[train_idx])
+            _pg_test = to_numpy(plot_groups[test_idx])
+            _yhat_train = estimator.predict(X_train, plot_groups=_pg_train)
+            _yhat_test = estimator.predict(X_test, plot_groups=_pg_test)
+            r2_train = r2_score(y_train, _yhat_train)
+            r2_test = r2_score(y_test, _yhat_test)
+            rmse_train = float(root_mean_squared_error(to_numpy(y_train), _yhat_train))
+            rmse_test = float(root_mean_squared_error(to_numpy(y_test), _yhat_test))
+        else:
+            r2_train = estimator.score(X_train, y_train)
+            r2_test = estimator.score(X_test, y_test)
+            rmse_train = estimator.rmse(X_train, y_train)
+            rmse_test = estimator.rmse(X_test, y_test)
 
         # Update cross-validation results
         results.test_r2.append(r2_test)

@@ -139,19 +139,33 @@ Optimisers are tried in order — L-BFGS, BFGS, Nelder-Mead — using the
 first that achieves convergence.  Non-convergence is logged as a warning
 and flagged in the saved hyperparameter artefacts (`converged=False`).
 
-### 4.5 Prediction for unseen plots
+### 4.5 Prediction and BLUP adjustment
 
-At test time the random intercept for any plot not seen during training
-is set to **zero** (population-level prediction, i.e. fixed effects only):
+Two prediction modes are used depending on context:
+
+**Fixed-effects only** (used for SHAP attribution and `y_pred` storage):
 
 ```text
 ŷ = Xβ̂
 ```
 
-This is consistent with the evaluation convention for GBDT and ElasticNet,
-both of which ignore plot identity at prediction time, and it ensures
-that out-of-sample R² and RMSE scores are comparable across all three
-model families.
+This ensures that `LinearExplainer` attribution reconstructs predictions
+exactly — the random intercept is not a feature and has no SHAP value.
+
+**BLUP-adjusted** (used for R² / RMSE under tree-wise CV):
+
+```text
+ŷ_ij = Xβ̂ + û_j
+```
+
+where û_j is the Best Linear Unbiased Predictor of the random intercept
+for plot j, taken from statsmodels' `random_effects` after fitting.
+Under tree-wise cross-validation the same plot can appear in both
+training and test folds (different trees), so the BLUP provides a valid
+out-of-sample estimate of the plot effect and yields fairer R² / RMSE
+numbers.  Observations whose plot was not seen during training receive
+û_j = 0 (population-level fallback).  Under plot-wise CV all test plots
+are unseen, so both modes coincide.
 
 ### 4.6 Variance components
 
