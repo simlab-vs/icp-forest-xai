@@ -132,8 +132,9 @@ variance filter → RobustScaler), fitted on the training fold only.
 
 ### 4.4 Estimation
 
-Parameters are estimated by **maximum likelihood (ML, REML=False)**
-so that CV-based model comparisons are likelihood-consistent.
+Parameters are estimated by **restricted maximum likelihood (REML)**,
+which gives unbiased variance-component estimates and therefore more
+accurate BLUPs.
 The implementation uses `statsmodels.regression.mixed_linear_model.MixedLM`.
 Optimisers are tried in order — L-BFGS, BFGS, Nelder-Mead — using the
 first that achieves convergence.  Non-convergence is logged as a warning

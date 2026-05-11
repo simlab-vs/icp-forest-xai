@@ -709,8 +709,8 @@ class MixedLMEstimator(EstimatorProtocol):
 
     Uses the same preprocessing pipeline as ElasticNetEstimator (missingness
     filter → median imputation → near-zero variance filter → RobustScaler).
-    The model is fitted with ML (REML=False) so that cross-validated scores
-    are likelihood-comparable.
+    The model is fitted with REML, which gives unbiased variance-component
+    estimates and therefore more accurate BLUPs.
 
     Prediction convention for unseen plots
     ---------------------------------------
@@ -726,7 +726,7 @@ class MixedLMEstimator(EstimatorProtocol):
         *,
         species: Species,
         group_by: str,
-        reml: bool = False,
+        reml: bool = True,
         **kwargs: Any,
     ) -> None:
         self.species = species
@@ -1265,6 +1265,7 @@ def train_and_explain(
 
         temporal_cv = HierarchicalTimeGroupCV(
             log_level=logging.ERROR,
+            random_state=RANDOM_STATE,
         )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
