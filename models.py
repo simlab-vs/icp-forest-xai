@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.feature_selection import VarianceThreshold
 
@@ -630,8 +631,22 @@ class ElasticNetEstimator(EstimatorProtocol):
             random_state=self.random_state,
             verbose=False,
         )
-        en_cv.fit(X_proc, y_arr)
+        # ConvergenceWarning is expected for the low-alpha tail of the path —
+        # those grid points are never selected by CV. Suppress the noise and
+        # emit our own warning only if CV actually picks the floor alpha.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            en_cv.fit(X_proc, y_arr)
         alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
+
+        if alpha <= alpha_min * 1.5:
+            logging.warning(
+                "[%s] Selected alpha (%.3e) is at/near the grid floor (%.3e); "
+                "path may be under-regularised — consider raising COND_MAX",
+                tag,
+                alpha,
+                alpha_min,
+            )
 
         # Log per-fold CV MSE at the selected (alpha, l1_ratio) to spot bad folds
         l1_idx = int(np.argmin(np.abs(np.atleast_1d(en_cv.l1_ratio) - l1_ratio)))
