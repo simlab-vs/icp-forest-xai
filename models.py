@@ -580,7 +580,7 @@ class ElasticNetEstimator(EstimatorProtocol):
         #   Solving (eig_max + n·α·(1−λ)) / (eig_min + n·α·(1−λ)) = COND_MAX gives:
         #     α_floor = (eig_max − COND_MAX·eig_min) / (n·(1−λ)·(COND_MAX−1))
         #   Worst case: largest l1_ratio (smallest ridge term 1−λ), requiring highest α.
-        _L1_RATIOS = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+        _L1_RATIOS = [0.1, 0.5, 0.7, 0.9, 0.95, 0.99]
         COND_MAX = 1e4
 
         alpha_max = float(np.max(np.abs(X_proc.T @ y_arr))) / n_obs
