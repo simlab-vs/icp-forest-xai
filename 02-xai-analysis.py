@@ -69,7 +69,9 @@ def _(joblib, mo, os, pl):
 
     # Filename pattern: results-{ablation}-{model_type}-{group_col}.pkl
     # ablation may contain hyphens, so anchor model_type and group_col from the right.
-    _pat = _re.compile(r"^results-(.+)-(gbdt|elasticnet)-(tree_id|plot_id|None)\.pkl$")
+    _pat = _re.compile(
+        r"^results-(.+)-(gbdt|elasticnet|lmm)-(tree_id|plot_id|None)\.pkl$"
+    )
     _csv = "./cache/performance_summary.csv"
 
     # Remove if
@@ -122,12 +124,16 @@ def _(mo, perf_df, pl):
         "plot-level-only": 2,
         "tree-level-only": 3,
     }
-    _MODEL_LABELS = {"gbdt": "GBDT", "elasticnet": "ElasticNet"}
+    _MODEL_LABELS = {
+        "gbdt": "GBDT",
+        "elasticnet": "ElasticNet",
+        "lmm": "Linear Mixed Effects",
+    }
 
     def build_paper_table(df: pl.DataFrame) -> pl.DataFrame:
         """Format a filtered performance DataFrame into a paper-ready R² table."""
         _r2_rows = df.filter(pl.col("split") == "test_r2").select(
-            "model", "ablation", "spruce", "pine", "beech", "oak"
+            "model", "ablation", "spruce", "pine", "oak", "beech"
         )
         # Weighted mean R² = Σ_species (n_species/n_total × R²_species)
         _weighted = df.filter(pl.col("split") == "test_weight_r2").select(
@@ -136,8 +142,8 @@ def _(mo, perf_df, pl):
             weighted_r2=(
                 pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
                 + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
-                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
                 + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
             )
             .round(2)
             .cast(pl.Utf8),
@@ -155,7 +161,11 @@ def _(mo, perf_df, pl):
                     ),
                     pl.lit(")"),
                 ),
-                _model_ord=pl.when(pl.col("model") == "gbdt").then(0).otherwise(1),
+                _model_ord=pl.when(pl.col("model") == "gbdt")
+                .then(0)
+                .when(pl.col("model") == "elasticnet")
+                .then(1)
+                .otherwise(2),
                 _ablation_ord=pl.col("ablation").map_elements(
                     lambda a: _ABLATION_ORDER.get(a, 99), return_dtype=pl.Int32
                 ),
@@ -170,7 +180,7 @@ def _(mo, perf_df, pl):
                     "weighted_r2": "Weighted R²",
                 }
             )
-            .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted R²")
+            .select("config", "Spruce", "Pine", "Oak", "Beech", "Weighted R²")
             .rename({"config": "Configuration"})
         )
 
@@ -225,7 +235,9 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    model_type_ui = mo.ui.dropdown(["gbdt", "elasticnet"], value="gbdt", label="Model")
+    model_type_ui = mo.ui.dropdown(
+        ["gbdt", "elasticnet", "lmm"], value="gbdt", label="Model"
+    )
     ablation_ui = mo.ui.dropdown(
         ["all", "no-defoliation", "tree-level-only", "plot-level-only"],
         value="all",
@@ -313,7 +325,12 @@ def _(ablation, group_col, mo, model_type, os, pl):
                 for p in _param_cols
             ]
         )
+        .with_columns(
+            pl.col("species").cast(pl.Enum(["spruce", "pine", "oak", "beech"]))
+        )
         .sort("species")
+        .with_columns(pl.col("species").cast(pl.Utf8))
+        .transpose(column_names="species", include_header=True, header_name="Parameter")
     )
 
     mo.vstack(
@@ -322,6 +339,191 @@ def _(ablation, group_col, mo, model_type, os, pl):
             mo.ui.table(hp_summary),
             mo.md("**Per-fold values**"),
             mo.ui.table(_hp.sort("species", "fold")),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, model_type):
+    mo.stop(
+        model_type not in ("elasticnet", "lmm"),
+        mo.callout(
+            mo.md(
+                "Preprocessing drop report is only available for linear models (ElasticNet, LMM)."
+            ),
+            kind="info",
+        ),
+    )
+    mo.md("### Features dropped by preprocessing")
+    return
+
+
+@app.cell
+def _(all_results, cs, mo, model_type, pl):
+    from models import ElasticNetEstimator, MixedLMEstimator as _MixedLMEstimator  # ty: ignore[unresolved-import]
+
+    mo.stop(model_type not in ("elasticnet", "lmm"))
+
+    _rows = []
+    for _species, _res in all_results.items():
+        _feat_names = _res.features
+        for _fold, _est in enumerate(_res.estimators):
+            if not isinstance(_est, (ElasticNetEstimator, _MixedLMEstimator)):
+                continue
+            _miss_mask = (
+                _est._miss_filter.get_support()
+            )  # True = kept after missingness filter
+            _var_mask = _est._var_mask  # True = kept after both filters
+            for _i, _feat in enumerate(_feat_names):
+                if not _miss_mask[_i]:
+                    _rows.append(
+                        {
+                            "species": _species,
+                            "fold": _fold,
+                            "feature": _feat,
+                            "reason": "missingness >50%",
+                        }
+                    )
+                elif not _var_mask[_i]:
+                    _rows.append(
+                        {
+                            "species": _species,
+                            "fold": _fold,
+                            "feature": _feat,
+                            "reason": "near-zero variance",
+                        }
+                    )
+
+    mo.stop(
+        not _rows,
+        mo.callout(
+            mo.md("No features were dropped by the preprocessing pipeline."),
+            kind="success",
+        ),
+    )
+
+    _dropped = pl.DataFrame(_rows)
+    num_folds = next(iter(all_results.values())).num_folds
+
+    # Aggregate: one row per (species, feature, reason), with fold count and list
+    dropped_features = (
+        _dropped.group_by("species", "feature", "reason")
+        .agg(
+            n_folds=pl.col("fold").n_unique(),
+            folds=pl.col("fold").sort().cast(pl.Utf8).implode().list.join(", "),
+        )
+        .sort("species", "reason", "feature")
+    )
+
+    # Cross-species summary: features dropped in every species × fold combination
+    _consistent = (
+        _dropped.group_by("feature", "reason", "species")
+        .agg(n_folds=pl.col("fold").n_unique())
+        .filter(pl.col("n_folds") > 0)
+        .sort("reason", "feature")
+        .pivot(on="species", values="n_folds")
+        .pipe(
+            lambda df: df.select(
+                pl.col("feature"),
+                pl.col("reason"),
+                *[
+                    pl.col(s) / num_folds * 100
+                    for s in ["spruce", "pine", "oak", "beech"]
+                    if s in df.columns
+                ],
+                pl.mean_horizontal(cs.numeric().fill_null(0) / num_folds * 100).alias(
+                    "total [%]"
+                ),
+            )
+        )
+        .sort(by=cs.contains("total"), descending=True)
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                f"Features dropped in at least one CV fold (out of {num_folds}) "
+                "by the missingness filter (>50% missing) or near-zero variance filter."
+            ),
+            mo.ui.table(dropped_features),
+            mo.md(
+                f"**Consistently dropped** across all species and folds "
+                f"({len(_consistent)} feature(s)):"
+            ),
+            mo.ui.table(_consistent) if len(_consistent) else mo.md("_None_"),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, model_type):
+    mo.stop(
+        model_type != "lmm",
+        mo.callout(
+            mo.md(
+                "Variance components and ICC are only available for the **LMM** model."
+            ),
+            kind="info",
+        ),
+    )
+    mo.md("### Variance components (LMM)")
+    return
+
+
+@app.cell
+def _(ablation, group_col, mo, model_type, os, pl):
+    mo.stop(model_type != "lmm")
+
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+    mo.stop(
+        not os.path.exists(_hp_path),
+        mo.callout(
+            mo.md(f"`{_hp_path}` not found — re-run training first."), kind="warn"
+        ),
+    )
+
+    _hp = pl.read_parquet(_hp_path)
+
+    # Per-fold table
+    _per_fold = _hp.select(
+        "species", "fold", "var_random", "var_resid", "icc", "converged"
+    ).sort("species", "fold")
+
+    # Summary table: mean ± std ICC across folds, formatted for the paper
+    icc_summary = (
+        _hp.group_by("species")
+        .agg(
+            var_random=pl.col("var_random").mean().round(4),
+            var_resid=pl.col("var_resid").mean().round(4),
+            icc=pl.concat_str(
+                pl.col("icc").mean().round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("icc").std().round(3).cast(pl.Utf8),
+            ),
+            converged=pl.col("converged").all(),
+        )
+        .rename(
+            {
+                "var_random": "σ²_u (between-plot)",
+                "var_resid": "σ²_e (within-plot)",
+                "icc": "ICC (mean ± std)",
+            }
+        )
+        .sort("species")
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Intraclass correlation coefficient** ICC = σ²_u / (σ²_u + σ²_e): "
+                "proportion of total variance attributable to between-plot differences. "
+                "Mean ± std across 5 CV folds."
+            ),
+            mo.ui.table(icc_summary),
+            mo.md("**Per-fold values**"),
+            mo.ui.table(_per_fold),
         ]
     )
     return
@@ -487,8 +689,11 @@ def _(
         else "Feature importance (mean |SHAP| %)"
     )
     plt.ylabel("Feature")
+    _model_label = {"gbdt": "GBDT", "elasticnet": "ElasticNet", "lmm": "LMM"}.get(
+        model_type, model_type
+    )
     plt.title(
-        f"Feature importance ({'GBDT' if model_type == 'gbdt' else 'ElasticNet'}, "
+        f"Feature importance ({_model_label}, "
         f"{'all features' if ablation == 'all' else 'w/o defoliation'})"
     )
     plt.savefig(
