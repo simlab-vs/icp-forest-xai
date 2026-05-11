@@ -7,7 +7,30 @@ It is intended as a reference for updating the paper's Methods section.
 
 ---
 
-## 1. Cross-validation strategy
+## 1. Target variable
+
+The response is the **log relative growth rate** (log-RGR) per year, stored as
+`growth_rate_rel` in the data.
+
+Before modelling, a **probability integral transform (PIT)** is applied to
+stabilise variance and render the marginal target distribution approximately
+uniform:
+
+1. **Shift**: y′ = log-RGR + 1 (ensures y′ > 0 across all observed values).
+2. **Fit**: a log-normal distribution is fitted to y′ on the full per-species
+   dataset (`scipy.stats.lognorm.fit`).
+3. **Transform**: ỹ = F_lognorm(y′) ∈ (0, 1).
+
+The PIT gives linear models a better-conditioned regression problem.
+SHAP values and model coefficients are expressed in PIT-quantile units;
+the notebook provides utilities to map predictions back to the original
+log-RGR scale.
+
+The LMM additionally z-scores ỹ on the training fold before fitting (§5.2).
+
+---
+
+## 2. Cross-validation strategy
 
 All models are evaluated with **5-fold grouped cross-validation**.
 The grouping column is `tree_id`, so all observations from a given tree
@@ -22,7 +45,7 @@ All results reported in the paper use temporal blocking.
 
 ---
 
-## 2. Gradient-boosted decision trees (GBDT)
+## 3. Gradient-boosted decision trees (GBDT)
 
 The GBDT model uses **LightGBM** with hyperparameters selected by
 Optuna (TPE sampler, 5-fold inner CV, 100 trials).
@@ -32,9 +55,9 @@ structure and does not require a background dataset.
 
 ---
 
-## 3. ElasticNet linear model
+## 4. ElasticNet linear model
 
-### 3.1 Feature preprocessing (per outer fold, fit on training data only)
+### 4.1 Feature preprocessing (per outer fold, fit on training data only)
 
 The following steps are applied in order, each fitted exclusively on the
 training portion of the outer fold and then applied to both train and
@@ -62,7 +85,7 @@ test:
    interquartile range (`RobustScaler`), which limits the influence of
    outliers on the regularisation path.
 
-### 3.2 Hyperparameter selection
+### 4.2 Hyperparameter selection
 
 Regularisation hyperparameters are selected by **ElasticNetCV** (sklearn
 warm-started coordinate-descent path algorithm) using the same 5-fold
@@ -92,9 +115,9 @@ The warm-started path algorithm is used for hyperparameter selection
 because it is orders of magnitude faster than solving each
 (α, ℓ₁ ratio, fold) combination independently.
 
-### 3.3 Final model fit
+### 4.3 Final model fit
 
-Given the hyperparameters selected in §3.2, the final model for each
+Given the hyperparameters selected in §4.2, the final model for each
 outer fold is fitted using sklearn's **`ElasticNet`** (coordinate
 descent, `max_iter=100 000`). The high iteration cap ensures convergence
 on the ill-conditioned feature subsets that can arise after temporal
@@ -102,9 +125,9 @@ blocking removes large contiguous blocks of data.
 
 ---
 
-## 4. Mixed-effects linear model (LMM)
+## 5. Mixed-effects linear model (LMM)
 
-### 4.1 Model structure
+### 5.1 Model structure
 
 The LMM is a random-intercept model of the form
 
@@ -113,24 +136,25 @@ y_ij = Xβ + u_j + ε_ij,   u_j ~ N(0, σ²_u),   ε_ij ~ N(0, σ²_e)
 ```
 
 where *i* indexes an observation, *j* indexes its plot, **X** is the
-same preprocessed feature matrix as in the ElasticNet (§3.1), **β** is
+same preprocessed feature matrix as in the ElasticNet (§4.1), **β** is
 the fixed-effects coefficient vector, *u_j* is the plot-specific random
 intercept, and ε_ij is the residual.
 
-### 4.2 Target standardisation
+### 5.2 Target standardisation
 
-Before fitting, the target is standardised to zero mean and unit variance
-on the training fold.  Predictions are rescaled back to the original
-target space after fitting.  Standardisation is necessary to keep the
-optimiser well-conditioned given the mix of highly regularised and
-near-zero variance features that can arise under temporal blocking.
+Before fitting, the PIT-transformed target ỹ is standardised to zero
+mean and unit variance on the training fold.  Predictions are rescaled
+back to the PIT-quantile space after fitting.  Standardisation is
+necessary to keep the optimiser well-conditioned given the mix of highly
+regularised and near-zero variance features that can arise under
+temporal blocking.
 
-### 4.3 Feature preprocessing
+### 5.3 Feature preprocessing
 
-Identical to §3.1 (missingness filter → median imputation → near-zero
+Identical to §4.1 (missingness filter → median imputation → near-zero
 variance filter → RobustScaler), fitted on the training fold only.
 
-### 4.4 Estimation
+### 5.4 Estimation
 
 Parameters are estimated by **restricted maximum likelihood (REML)**,
 which gives unbiased variance-component estimates and therefore more
@@ -140,7 +164,7 @@ Optimisers are tried in order — L-BFGS, BFGS, Nelder-Mead — using the
 first that achieves convergence.  Non-convergence is logged as a warning
 and flagged in the saved hyperparameter artefacts (`converged=False`).
 
-### 4.5 Prediction and BLUP adjustment
+### 5.5 Prediction and BLUP adjustment
 
 Two prediction modes are used depending on context:
 
@@ -168,7 +192,7 @@ numbers.  Observations whose plot was not seen during training receive
 û_j = 0 (population-level fallback).  Under plot-wise CV all test plots
 are unseen, so both modes coincide.
 
-### 4.6 Variance components
+### 5.6 Variance components
 
 After fitting, the following quantities are extracted and stored in
 `cache/hyperparams-{ablation}-lmm-{group_col}.parquet`:
@@ -181,7 +205,7 @@ After fitting, the following quantities are extracted and stored in
 
 ---
 
-## 5. SHAP explainability
+## 6. SHAP explainability
 
 SHAP values are computed on the **full dataset** (all folds combined)
 using the fitted model from each outer fold.
@@ -206,7 +230,7 @@ across all observations and folds, optionally weighted by fold size.
 
 ---
 
-## 6. Ablation studies
+## 7. Ablation studies
 
 Four feature sets are evaluated for each model:
 
