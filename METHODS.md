@@ -1,7 +1,7 @@
 # Methods — modelling and explainability pipeline
 
 This document summarises the implementation choices made for the
-linear (ElasticNet) and gradient-boosted (GBDT / LightGBM)
+linear (ElasticNet, LMM) and gradient-boosted (GBDT / LightGBM)
 models and their SHAP-based explainability pipeline.
 It is intended as a reference for updating the paper's Methods section.
 
@@ -68,10 +68,25 @@ Regularisation hyperparameters are selected by **ElasticNetCV** (sklearn
 warm-started coordinate-descent path algorithm) using the same 5-fold
 grouped splits as the outer loop. The search covers:
 
-- **α** (regularisation strength): 100 values on a log scale spanning
-  [10⁻², 10²] (`np.logspace(-2, 2, 100)`).
-- **ℓ₁ ratio**: {0.5, 0.7, 0.9, 0.95, 0.99}, interpolating between
+- **ℓ₁ ratio**: {0.1, 0.5, 0.7, 0.9, 0.95, 0.99}, interpolating between
   Ridge (ℓ₁ ratio = 0) and Lasso (ℓ₁ ratio = 1).
+- **α** (regularisation strength): 100 log-spaced values on a data-driven
+  interval [α_min, α_max]:
+  - **α_max** = max|**X**ᵀ**y**| / n — the value at which all coefficients
+    vanish (start of the regularisation path), following the standard
+    sklearn convention.
+  - **α_min** is a *condition-number floor*: the smallest α for which the
+    regularised Gram matrix **X**ᵀ**X** + nα(1 − ℓ₁)·**I** has condition
+    number ≤ 10⁴. Rearranging the threshold equation gives
+
+    α_floor = (λ_max − κ · λ_min) / (n · (1 − ℓ₁) · (κ − 1))
+
+    where λ_max and λ_min are the extreme eigenvalues of **X**ᵀ**X** and
+    κ = 10⁴. The floor is evaluated at the worst-case ℓ₁ ratio (0.99),
+    which minimises the ridge term (1 − ℓ₁) and therefore requires the
+    highest α to satisfy the constraint. If **X**ᵀ**X** is already
+    well-conditioned (λ_max ≤ κ · λ_min), α_floor = 0 and a hard lower
+    bound of α_max × 10⁻⁶ is used.
 
 The warm-started path algorithm is used for hyperparameter selection
 because it is orders of magnitude faster than solving each
@@ -87,14 +102,82 @@ blocking removes large contiguous blocks of data.
 
 ---
 
-## 4. SHAP explainability
+## 4. Mixed-effects linear model (LMM)
+
+### 4.1 Model structure
+
+The LMM is a random-intercept model of the form
+
+```text
+y_ij = Xβ + u_j + ε_ij,   u_j ~ N(0, σ²_u),   ε_ij ~ N(0, σ²_e)
+```
+
+where *i* indexes an observation, *j* indexes its plot, **X** is the
+same preprocessed feature matrix as in the ElasticNet (§3.1), **β** is
+the fixed-effects coefficient vector, *u_j* is the plot-specific random
+intercept, and ε_ij is the residual.
+
+### 4.2 Target standardisation
+
+Before fitting, the target is standardised to zero mean and unit variance
+on the training fold.  Predictions are rescaled back to the original
+target space after fitting.  Standardisation is necessary to keep the
+optimiser well-conditioned given the mix of highly regularised and
+near-zero variance features that can arise under temporal blocking.
+
+### 4.3 Feature preprocessing
+
+Identical to §3.1 (missingness filter → median imputation → near-zero
+variance filter → RobustScaler), fitted on the training fold only.
+
+### 4.4 Estimation
+
+Parameters are estimated by **maximum likelihood (ML, REML=False)**
+so that CV-based model comparisons are likelihood-consistent.
+The implementation uses `statsmodels.regression.mixed_linear_model.MixedLM`.
+Optimisers are tried in order — L-BFGS, BFGS, Nelder-Mead — using the
+first that achieves convergence.  Non-convergence is logged as a warning
+and flagged in the saved hyperparameter artefacts (`converged=False`).
+
+### 4.5 Prediction for unseen plots
+
+At test time the random intercept for any plot not seen during training
+is set to **zero** (population-level prediction, i.e. fixed effects only):
+
+```text
+ŷ = Xβ̂
+```
+
+This is consistent with the evaluation convention for GBDT and ElasticNet,
+both of which ignore plot identity at prediction time, and it ensures
+that out-of-sample R² and RMSE scores are comparable across all three
+model families.
+
+### 4.6 Variance components
+
+After fitting, the following quantities are extracted and stored in
+`cache/hyperparams-{ablation}-lmm-{group_col}.parquet`:
+
+| Symbol | statsmodels attribute | Description |
+|---|---|---|
+| σ²_u (`var_random`) | `result.cov_re.iloc[0, 0]` | Between-plot variance |
+| σ²_e (`var_resid`) | `result.scale` | Within-plot (residual) variance |
+| ICC | σ²_u / (σ²_u + σ²_e) | Intraclass correlation coefficient |
+
+---
+
+## 5. SHAP explainability
 
 SHAP values are computed on the **full dataset** (all folds combined)
 using the fitted model from each outer fold.
 
 - **GBDT**: `TreeExplainer` with `tree_path_dependent` perturbation.
-- **ElasticNet**: `LinearExplainer` with an `Independent` masker built
-  from a 1 000-sample background set drawn from the training data.
+- **ElasticNet / LMM**: `LinearExplainer` with an `Independent` masker
+  built from a 1 000-sample background set drawn from the training data.
+  For the LMM, SHAP is computed on the fixed-effects coefficients only
+  (rescaled to the original target space via `_FixedEffectLinear`); the
+  random intercept is not included because it is set to zero at
+  prediction time for unseen plots.
   Because the preprocessing pipeline changes the feature space
   (missingness filter + variance filter), the SHAP computation is
   performed in the reduced (preprocessed) feature space and the
@@ -108,7 +191,7 @@ across all observations and folds, optionally weighted by fold size.
 
 ---
 
-## 5. Ablation studies
+## 6. Ablation studies
 
 Four feature sets are evaluated for each model:
 
