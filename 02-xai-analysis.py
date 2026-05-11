@@ -361,7 +361,7 @@ def _(mo, model_type):
 
 @app.cell
 def _(all_results, cs, mo, model_type, pl):
-    from models import ElasticNetEstimator, MixedLMEstimator as _MixedLMEstimator  # ty: ignore[unresolved-import]
+    from models import ElasticNetEstimator, MixedLMEstimator as _MixedLMEstimator
 
     mo.stop(model_type not in ("elasticnet", "lmm"))
 
@@ -473,7 +473,7 @@ def _(mo, model_type):
 
 
 @app.cell
-def _(ablation, group_col, mo, model_type, os, pl):
+def _(ablation, all_results, group_col, mo, model_type, np, os, pl):
     mo.stop(model_type != "lmm")
 
     _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
@@ -486,12 +486,60 @@ def _(ablation, group_col, mo, model_type, os, pl):
 
     _hp = pl.read_parquet(_hp_path)
 
-    # Per-fold table
-    _per_fold = _hp.select(
-        "species", "fold", "var_random", "var_resid", "icc", "converged"
-    ).sort("species", "fold")
+    # Per-fold R² / RMSE from already-loaded all_results
+    _perf_fold = pl.DataFrame(
+        [
+            {
+                "species": sp,
+                "fold": fold,
+                "R²": float(f["test_r2"]),
+                "RMSE": float(f["test_rmse"]),
+            }
+            for sp, res in all_results.items()
+            for fold, f in enumerate(res.performances)
+        ]
+    )
 
-    # Summary table: mean ± std ICC across folds, formatted for the paper
+    # Per-fold table: variance components + performance
+    _per_fold = (
+        _hp.select("species", "fold", "var_random", "var_resid", "icc", "converged")
+        .sort("species", "fold")
+        .join(_perf_fold, on=["species", "fold"], how="left")
+    )
+
+    # Summary table: mean ± std across folds for ICC, R², RMSE
+    _perf_summary = (
+        pl.DataFrame(
+            [
+                {
+                    "species": sp,
+                    "r2_mean": float(np.mean([f["test_r2"] for f in res.performances])),
+                    "r2_std": float(np.std([f["test_r2"] for f in res.performances])),
+                    "rmse_mean": float(
+                        np.mean([f["test_rmse"] for f in res.performances])
+                    ),
+                    "rmse_std": float(
+                        np.std([f["test_rmse"] for f in res.performances])
+                    ),
+                }
+                for sp, res in all_results.items()
+            ]
+        )
+        .with_columns(
+            R2=pl.concat_str(
+                pl.col("r2_mean").round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("r2_std").round(3).cast(pl.Utf8),
+            ),
+            RMSE=pl.concat_str(
+                pl.col("rmse_mean").round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("rmse_std").round(3).cast(pl.Utf8),
+            ),
+        )
+        .select("species", "R2", "RMSE")
+    )
+
     icc_summary = (
         _hp.group_by("species")
         .agg(
@@ -511,6 +559,7 @@ def _(ablation, group_col, mo, model_type, os, pl):
                 "icc": "ICC (mean ± std)",
             }
         )
+        .join(_perf_summary, on="species", how="left")
         .sort("species")
     )
 
