@@ -42,6 +42,15 @@ warnings.filterwarnings(
     category=FutureWarning,
     module="sklearn",
 )
+# ConvergenceWarning from the low-alpha tail of the ElasticNet path is expected:
+# the path algorithm evaluates all grid points but CV never selects the unconverged ones.
+# catch_warnings() is thread-local in Python 3.12+, so this must be a module-level
+# filter to be visible to joblib worker threads.
+warnings.filterwarnings(
+    "ignore",
+    category=ConvergenceWarning,
+    module=r"sklearn\.linear_model\._coordinate_descent",
+)
 
 Split = Literal["train", "test", "all"]
 ModelType = Literal["gbdt", "elasticnet", "lmm"]
@@ -631,12 +640,7 @@ class ElasticNetEstimator(EstimatorProtocol):
             random_state=self.random_state,
             verbose=False,
         )
-        # ConvergenceWarning is expected for the low-alpha tail of the path —
-        # those grid points are never selected by CV. Suppress the noise and
-        # emit our own warning only if CV actually picks the floor alpha.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ConvergenceWarning)
-            en_cv.fit(X_proc, y_arr)
+        en_cv.fit(X_proc, y_arr)
         alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
 
         if alpha <= alpha_min * 1.5:
