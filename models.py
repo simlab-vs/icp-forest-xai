@@ -592,7 +592,9 @@ class ElasticNetEstimator(EstimatorProtocol):
             if _excess > 0.0
             else 0.0
         )
-        alpha_min = max(alpha_cond_floor, alpha_max * 1e-6)  # hard fallback
+        # Hard fallback matches sklearn's default eps=1e-3 (alpha_min = alpha_max / 1000).
+        # A smaller value risks near-unregularised CD paths that never converge.
+        alpha_min = max(alpha_cond_floor, alpha_max * 1e-3)
 
         if alpha_min >= alpha_max:
             logging.warning(
@@ -624,6 +626,7 @@ class ElasticNetEstimator(EstimatorProtocol):
             alphas=alphas_grid,
             cv=cv_splits,
             max_iter=100_000,
+            tol=1e-3,
             random_state=self.random_state,
             verbose=False,
         )
