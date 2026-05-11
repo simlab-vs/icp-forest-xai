@@ -118,6 +118,7 @@ def _save_hyperparams(
     ablation: str,
     model_type: str,
     group_col: str,
+    use_temporal_cv: bool,
 ) -> None:
     rows = []
     for species, results in all_results.items():
@@ -130,7 +131,8 @@ def _save_hyperparams(
     if not rows:
         return
 
-    path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     pl.DataFrame(rows).write_parquet(path)
     print(f"Hyperparameters saved to {path}")
 
@@ -146,7 +148,8 @@ def main() -> None:
 
     os.makedirs("./cache", exist_ok=True)
 
-    results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    results_path = f"./cache/results-{ablation}-{model_type}-{group_col}-{_tcv}.pkl"
 
     if cache_mode == "skip" and os.path.exists(results_path):
         print(f"Skipping: cached results already exist at {results_path}")
@@ -203,11 +206,11 @@ def main() -> None:
         value_name="shap",
     )
 
-    fi_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
+    fi_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     feature_importances.write_parquet(fi_path)
     print(f"Feature importances saved to {fi_path}")
 
-    _save_hyperparams(all_results, ablation, model_type, group_col)
+    _save_hyperparams(all_results, ablation, model_type, group_col, use_temporal_cv)
 
     _print_summary(all_results)
 

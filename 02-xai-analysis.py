@@ -70,7 +70,7 @@ def _(joblib, mo, os, pl):
     # Filename pattern: results-{ablation}-{model_type}-{group_col}.pkl
     # ablation may contain hyphens, so anchor model_type and group_col from the right.
     _pat = _re.compile(
-        r"^results-(.+)-(gbdt|elasticnet|lmm)-(tree_id|plot_id|None)\.pkl$"
+        r"^results-(.+)-(gbdt|elasticnet|lmm)-(tree_id|plot_id|None)-(temporal|standard)\.pkl$"
     )
     _csv = "./cache/performance_summary.csv"
 
@@ -83,16 +83,16 @@ def _(joblib, mo, os, pl):
         _m = _pat.match(os.path.basename(_path))
         if not _m:
             continue
-        _ablation, _model_type, _group_col_str = _m.groups()
+        _ablation, _model_type, _group_col_str, _tcv_str = _m.groups()
         _results = joblib.load(_path)
         _summarize(
             _results,
             ablation=_ablation,
             model_type=_model_type,
             group_col=_group_col_str,
-            use_temporal_cv=True,
+            use_temporal_cv=_tcv_str == "temporal",
         )
-        _loaded.append(f"{_model_type}/{_ablation}/{_group_col_str}")
+        _loaded.append(f"{_model_type}/{_ablation}/{_group_col_str}/{_tcv_str}")
 
     mo.stop(
         not _loaded,
@@ -253,7 +253,7 @@ def _(mo):
         [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
         gap=2,
     )
-    return ablation_ui, group_col_ui, model_type_ui, weight_shap_ui
+    return ablation_ui, group_col_ui, model_type_ui, temporal_cv_ui, weight_shap_ui
 
 
 @app.cell
@@ -264,28 +264,39 @@ def _(
     mo,
     model_type_ui,
     os,
+    temporal_cv_ui,
     weight_shap_ui,
 ):
     model_type = model_type_ui.value
     ablation = ablation_ui.value
     group_col = None if group_col_ui.value == "none" else group_col_ui.value
+    use_temporal_cv = temporal_cv_ui.value
     weight_shap_fimp = weight_shap_ui.value
 
-    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}-{_tcv}.pkl"
+    _tcv_flag = "--temporal-cv" if use_temporal_cv else ""
     mo.stop(
         not os.path.exists(_results_path),
         mo.callout(
             mo.md(
                 f"No cached results at `{_results_path}`.\n\nRun `./train-all.sh` (or "
                 f"`uv run train.py --model-type {model_type} --ablation {ablation} "
-                f"--group-col {group_col or 'none'} --temporal-cv`) first."
+                f"--group-col {group_col or 'none'} {_tcv_flag}`) first."
             ),
             kind="warn",
         ),
     )
     all_results = joblib.load(_results_path)
     mo.md(f"Loaded **{len(all_results)} species** from `{_results_path}`")
-    return ablation, all_results, group_col, model_type, weight_shap_fimp
+    return (
+        ablation,
+        all_results,
+        group_col,
+        model_type,
+        use_temporal_cv,
+        weight_shap_fimp,
+    )
 
 
 @app.cell(hide_code=True)
@@ -297,8 +308,9 @@ def _(mo):
 
 
 @app.cell
-def _(ablation, group_col, mo, model_type, os, pl):
-    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+def _(ablation, group_col, mo, model_type, os, pl, use_temporal_cv):
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
 
     mo.stop(
         not os.path.exists(_hp_path),
@@ -473,10 +485,11 @@ def _(mo, model_type):
 
 
 @app.cell
-def _(ablation, all_results, group_col, mo, model_type, np, os, pl):
+def _(ablation, all_results, group_col, mo, model_type, np, os, pl, use_temporal_cv):
     mo.stop(model_type != "lmm")
 
-    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     mo.stop(
         not os.path.exists(_hp_path),
         mo.callout(
@@ -560,7 +573,12 @@ def _(ablation, all_results, group_col, mo, model_type, np, os, pl):
             }
         )
         .join(_perf_summary, on="species", how="left")
+        .with_columns(
+            pl.col("species").cast(pl.Enum(["spruce", "pine", "oak", "beech"]))
+        )
         .sort("species")
+        .with_columns(pl.col("species").cast(pl.Utf8))
+        .transpose(column_names="species", include_header=True, header_name="Metric")
     )
 
     mo.vstack(
@@ -579,7 +597,7 @@ def _(ablation, all_results, group_col, mo, model_type, np, os, pl):
 
 
 @app.cell
-def _(ablation, all_results, cs, group_col, model_type, np, pl):
+def _(ablation, all_results, cs, group_col, model_type, np, pl, use_temporal_cv):
     feature_importances = pl.from_dicts(
         [
             {
@@ -603,8 +621,9 @@ def _(ablation, all_results, cs, group_col, model_type, np, pl):
         value_name="shap",
     )
 
+    _tcv = "temporal" if use_temporal_cv else "standard"
     feature_importances.write_parquet(
-        f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
+        f"./cache/feature_importances-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     )
     feature_importances
     return (feature_importances,)
@@ -762,10 +781,13 @@ def _(mo):
 
 
 @app.cell
-def _(ablation, feature_importances, group_col, mo, model_type, os, pl):
+def _(
+    ablation, feature_importances, group_col, mo, model_type, os, pl, use_temporal_cv
+):
     _other = "no-defoliation" if ablation == "all" else "all"
+    _tcv = "temporal" if use_temporal_cv else "standard"
     _other_path = (
-        f"./cache/feature_importances-{_other}-{model_type}-{group_col}.parquet"
+        f"./cache/feature_importances-{_other}-{model_type}-{group_col}-{_tcv}.parquet"
     )
 
     mo.stop(
