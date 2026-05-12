@@ -82,12 +82,16 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
         Returns
         -------
         pl.DataFrame
-            DataFrame with added 'period_idx' column.
+            DataFrame with added 'period_idx' column, in the same row order as the input.
         """
         self.logger.info("Adding period indices to dataframe")
 
+        # Tag original row order so we can restore it after the per-plot loop,
+        # which otherwise reorders rows by plot_id iteration order.
+        df = df.with_row_index("_orig_idx")
+
         dfs = []
-        for plot_id in df["plot_id"].unique():
+        for plot_id in df["plot_id"].unique(maintain_order=True):
             plot_df = df.filter(pl.col("plot_id") == plot_id)
             intervals = (
                 plot_df.group_by(["period_start", "period_end"])
@@ -98,7 +102,7 @@ class HierarchicalTimeGroupCV(BaseCrossValidator):
             plot_df = plot_df.join(intervals, on=["period_start", "period_end"])
             dfs.append(plot_df)
 
-        result_df = pl.concat(dfs)
+        result_df = pl.concat(dfs).sort("_orig_idx").drop("_orig_idx")
         self.logger.info("Created dataframe with period_idx column")
         return result_df
 

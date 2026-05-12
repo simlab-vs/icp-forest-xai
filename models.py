@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from config import Ablation, Species
 from lightgbm import LGBMRegressor
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.feature_selection import VarianceThreshold
 
@@ -41,9 +42,18 @@ warnings.filterwarnings(
     category=FutureWarning,
     module="sklearn",
 )
+# ConvergenceWarning from the low-alpha tail of the ElasticNet path is expected:
+# the path algorithm evaluates all grid points but CV never selects the unconverged ones.
+# catch_warnings() is thread-local in Python 3.12+, so this must be a module-level
+# filter to be visible to joblib worker threads.
+warnings.filterwarnings(
+    "ignore",
+    category=ConvergenceWarning,
+    module=r"sklearn\.linear_model\._coordinate_descent",
+)
 
 Split = Literal["train", "test", "all"]
-ModelType = Literal["gbdt", "elasticnet"]
+ModelType = Literal["gbdt", "elasticnet", "lmm"]
 MatrixLike = np.ndarray | pl.DataFrame
 VectorLike = np.ndarray | pl.Series
 
@@ -555,13 +565,66 @@ class ElasticNetEstimator(EstimatorProtocol):
                     dropped_var,
                 )
 
-        cond = float(np.linalg.cond(X_proc))
+        # Eigenvalues of the Gram matrix (p×p) for condition diagnostics and α grid.
+        n_obs, _p = X_proc.shape
+        G = X_proc.T @ X_proc
+        eigvals = np.linalg.eigvalsh(G)  # ascending, real (symmetric matrix)
+        eig_min = max(float(eigvals[0]), 0.0)
+        eig_max = float(eigvals[-1])
+        cond_gram = eig_max / eig_min if eig_min > 0.0 else np.inf
         logging.info(
-            "[%s] Design matrix: shape=%s, cond=%.2e",
+            "[%s] Gram matrix: shape=(%d×%d), eig_min=%.3e, eig_max=%.3e, cond=%.2e",
             tag,
-            X_proc.shape,
-            cond,
+            _p,
+            _p,
+            eig_min,
+            eig_max,
+            cond_gram,
         )
+
+        # Data-driven α grid -------------------------------------------------------
+        # Upper bound: α at which all coefficients vanish (sklearn path convention),
+        #   α_max(λ) = max|X^T y| / (n·λ).  We use the smallest l1_ratio so the grid
+        #   covers the full useful range for all mixing ratios.
+        # Lower bound: smallest α s.t. cond(G + n·α·(1−λ)·I) ≤ COND_MAX.
+        #   Solving (eig_max + n·α·(1−λ)) / (eig_min + n·α·(1−λ)) = COND_MAX gives:
+        #     α_floor = (eig_max − COND_MAX·eig_min) / (n·(1−λ)·(COND_MAX−1))
+        #   Worst case: largest l1_ratio (smallest ridge term 1−λ), requiring highest α.
+        _L1_RATIOS = [0.1, 0.5, 0.7, 0.9, 0.95, 0.99]
+        COND_MAX = 1e4
+
+        alpha_max = float(np.max(np.abs(X_proc.T @ y_arr))) / n_obs
+
+        _worst_l1 = max(lr for lr in _L1_RATIOS if lr < 1.0)  # 0.99
+        _excess = eig_max - COND_MAX * eig_min
+        alpha_cond_floor = (
+            _excess / (n_obs * (1.0 - _worst_l1) * (COND_MAX - 1))
+            if _excess > 0.0
+            else 0.0
+        )
+        # Hard fallback matches sklearn's default eps=1e-3 (alpha_min = alpha_max / 1000).
+        # A smaller value risks near-unregularised CD paths that never converge.
+        alpha_min = max(alpha_cond_floor, alpha_max * 1e-3)
+
+        if alpha_min >= alpha_max:
+            logging.warning(
+                "[%s] Condition-number floor (%.3e) >= alpha_max (%.3e); "
+                "falling back to alpha_max * 1e-3",
+                tag,
+                alpha_cond_floor,
+                alpha_max,
+            )
+            alpha_min = alpha_max * 1e-3
+
+        logging.info(
+            "[%s] alpha grid: alpha_max=%.3e, cond_floor=%.3e, alpha_min=%.3e (100 pts)",
+            tag,
+            alpha_max,
+            alpha_cond_floor,
+            alpha_min,
+        )
+        alphas_grid = np.logspace(np.log10(alpha_min), np.log10(alpha_max), 100)
+        # --------------------------------------------------------------------------
 
         # Pre-compute splits so ElasticNetCV.fit() never needs a groups= kwarg
         groups_arr = to_numpy(groups)
@@ -569,16 +632,25 @@ class ElasticNetEstimator(EstimatorProtocol):
         cv_splits = list(splitter.split(X_proc, y_arr, groups=groups_arr))
 
         en_cv = ElasticNetCV(
-            l1_ratio=[0.5, 0.7, 0.9, 0.95, 0.99],
-            alphas=np.logspace(-2, 2, 100),
-            eps=1e-2,
+            l1_ratio=_L1_RATIOS,
+            alphas=alphas_grid,
             cv=cv_splits,
-            max_iter=100_000,
+            max_iter=10_000,
+            tol=1e-3,
             random_state=self.random_state,
             verbose=False,
         )
         en_cv.fit(X_proc, y_arr)
         alpha, l1_ratio = en_cv.alpha_, en_cv.l1_ratio_
+
+        if alpha <= alpha_min * 1.5:
+            logging.warning(
+                "[%s] Selected alpha (%.3e) is at/near the grid floor (%.3e); "
+                "path may be under-regularised — consider raising COND_MAX",
+                tag,
+                alpha,
+                alpha_min,
+            )
 
         # Log per-fold CV MSE at the selected (alpha, l1_ratio) to spot bad folds
         l1_idx = int(np.argmin(np.abs(np.atleast_1d(en_cv.l1_ratio) - l1_ratio)))
@@ -644,6 +716,252 @@ class ElasticNetEstimator(EstimatorProtocol):
             raise ValueError("Model has not been fitted yet.")
 
         return self._model
+
+
+@dataclass
+class _FixedEffectLinear:
+    """Minimal sklearn-compatible wrapper for SHAP LinearExplainer (fixed effects only)."""
+
+    coef_: np.ndarray
+    intercept_: float
+
+
+class MixedLMEstimator(EstimatorProtocol):
+    """Mixed-effects linear model with a per-plot random intercept.
+
+    Uses the same preprocessing pipeline as ElasticNetEstimator (missingness
+    filter → median imputation → near-zero variance filter → RobustScaler).
+    The model is fitted with REML, which gives unbiased variance-component
+    estimates and therefore more accurate BLUPs.
+
+    Prediction convention for unseen plots
+    ---------------------------------------
+    At test time the random intercept for an unseen plot is set to zero
+    (population-level prediction).  This is consistent with how GBDT and
+    ElasticNet are evaluated: both ignore plot identity at prediction time and
+    are therefore assessed on the same basis as the fixed-effects-only part of
+    the LMM.
+    """
+
+    def __init__(
+        self,
+        *,
+        species: Species,
+        group_by: str,
+        reml: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        self.species = species
+        self.group_by = group_by
+        self.reml = reml
+
+        self._miss_filter: MissingnessFilter | None = None
+        self._preprocessor: Pipeline | None = None
+        self._result: Any = None  # statsmodels MixedLMResultsWrapper
+        self._var_mask: np.ndarray | None = None
+        self._feature_names_proc: list[str] = []
+
+        self._y_mean: float = 0.0
+        self._y_std: float = 1.0
+        self._y_min: float = -np.inf
+        self._y_max: float = np.inf
+
+        self._converged: bool = True
+        self.var_random: float | None = None
+        self.var_resid: float | None = None
+        self.icc: float | None = None
+        self.plot_blup_: dict[str, float] = {}
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        if self._result is None:
+            raise ValueError("Model has not been fitted yet.")
+        return {"reml": self.reml}
+
+    def set_params(self, **params: Any) -> "MixedLMEstimator":
+        if "reml" in params:
+            self.reml = params["reml"]
+        return self
+
+    def fit(self, X: MatrixLike, y: VectorLike, **kwargs: Any) -> "MixedLMEstimator":
+        import pandas as pd
+        import statsmodels.api as sm
+        from statsmodels.regression.mixed_linear_model import MixedLM
+
+        plot_groups = kwargs.get("plot_groups", None)
+        fold: int | None = kwargs.get("fold", None)
+        feature_names = list(X.columns) if isinstance(X, pl.DataFrame) else None
+        tag = f"{self.species}|fold={fold}" if fold is not None else self.species
+
+        X_np = to_numpy(X).astype(float)
+        y_arr = to_numpy(y).astype(float)
+
+        # Standardise target to improve optimiser convergence
+        self._y_mean = float(y_arr.mean())
+        self._y_std = float(y_arr.std()) or 1.0
+        y_std = (y_arr - self._y_mean) / self._y_std
+        self._y_min, self._y_max = float(y_arr.min()), float(y_arr.max())
+
+        # --- Preprocessing: identical to ElasticNetEstimator ---
+        self._miss_filter = MissingnessFilter(threshold=0.5)
+        X_np_filtered = self._miss_filter.fit_transform(X_np)
+        miss_mask = self._miss_filter.get_support()
+
+        self._preprocessor = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                ("var_threshold", VarianceThreshold(threshold=1e-4)),
+                ("scaler", RobustScaler()),
+            ]
+        )
+        self._preprocessor.fit(X_np_filtered)
+        X_proc = self._preprocessor.transform(X_np_filtered).astype(float)
+
+        var_mask_partial = self._preprocessor.named_steps["var_threshold"].get_support()
+        full_mask = np.zeros(X_np.shape[1], dtype=bool)
+        full_mask[miss_mask] = var_mask_partial
+        self._var_mask = full_mask
+
+        if feature_names is not None:
+            kept_after_miss = [f for f, keep in zip(feature_names, miss_mask) if keep]
+            self._feature_names_proc = [
+                f for f, keep in zip(kept_after_miss, var_mask_partial) if keep
+            ]
+        else:
+            self._feature_names_proc = [f"x{i}" for i in range(X_proc.shape[1])]
+
+        # --- Fit MixedLM with random intercept per plot ---
+        X_pd = pd.DataFrame(X_proc, columns=self._feature_names_proc)
+        X_pd_const = sm.add_constant(X_pd, has_constant="add")
+        y_pd = pd.Series(y_std, name="y")
+
+        if plot_groups is not None:
+            groups_series = pd.Series(plot_groups.astype(str), name="plot_id")
+        else:
+            logging.warning(
+                "[%s] No plot_groups; random intercept will be degenerate", tag
+            )
+            groups_series = pd.Series(
+                np.zeros(len(y_pd), dtype=int).astype(str), name="plot_id"
+            )
+
+        model = MixedLM(endog=y_pd, exog=X_pd_const, groups=groups_series)
+
+        result = None
+        for method in ("lbfgs", "bfgs", "nm"):
+            try:
+                result = model.fit(reml=self.reml, method=method, disp=False)
+                self._converged = bool(result.converged)
+                if self._converged:
+                    break
+                logging.warning(
+                    "[%s] MixedLM method=%s did not converge; trying next", tag, method
+                )
+            except Exception as exc:
+                logging.warning("[%s] MixedLM method=%s failed: %s", tag, method, exc)
+
+        if result is None:
+            raise RuntimeError(f"[{tag}] MixedLM failed with all optimisation methods")
+
+        if not self._converged:
+            logging.warning(
+                "[%s] MixedLM: no method converged; variance estimates may be unreliable",
+                tag,
+            )
+
+        self.var_random = float(result.cov_re.iloc[0, 0])
+        self.var_resid = float(result.scale)
+        total_var = self.var_random + self.var_resid
+        self.icc = self.var_random / total_var if total_var > 0 else 0.0
+
+        logging.info(
+            "[%s] MixedLM: var_random=%.4f, var_resid=%.4f, ICC=%.4f, converged=%s",
+            tag,
+            self.var_random,
+            self.var_resid,
+            self.icc,
+            self._converged,
+        )
+
+        top_idx = np.argsort(np.abs(result.fe_params.values))[::-1][:5]
+        top_str = ", ".join(
+            f"{result.fe_params.index[i]}={result.fe_params.iloc[i]:+.4f}"
+            for i in top_idx
+        )
+        logging.info("[%s] Top-5 fixed effects: %s", tag, top_str)
+
+        # BLUPs (in standardised target space): û_j from statsmodels random_effects
+        self.plot_blup_ = {
+            str(plot_id): float(re.iloc[0])
+            for plot_id, re in result.random_effects.items()
+        }
+        logging.info(
+            "[%s] BLUP: stored random intercepts for %d training plots",
+            tag,
+            len(self.plot_blup_),
+        )
+
+        self._result = result
+        return self
+
+    def predict(
+        self, X: MatrixLike, plot_groups: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Predict using fixed effects plus optional per-plot BLUP adjustment.
+
+        Parameters
+        ----------
+        plot_groups
+            Plot identifier for each row.  When provided, the BLUP û_j estimated
+            during training is added for every plot seen in the training fold.
+            Observations whose plot was not in training receive û_j = 0
+            (population-level prediction).  Pass None to always use fixed effects
+            only (e.g. for SHAP attribution, which must reconstruct y_pred
+            without the random-intercept term).
+        """
+        if self._result is None:
+            raise ValueError("Model has not been fitted yet.")
+        X_proc = self.transform(X)
+        X_with_const = np.column_stack([np.ones(len(X_proc)), X_proc])
+        y_std_pred = X_with_const @ self._result.fe_params.values
+
+        if plot_groups is not None and self.plot_blup_:
+            blup_adj = np.fromiter(
+                (self.plot_blup_.get(str(p), 0.0) for p in plot_groups),
+                dtype=float,
+                count=len(plot_groups),
+            )
+            y_std_pred = y_std_pred + blup_adj
+
+        return np.clip(
+            y_std_pred * self._y_std + self._y_mean, self._y_min, self._y_max
+        )
+
+    def transform(self, X: MatrixLike) -> np.ndarray:
+        """Apply the preprocessing stack (missingness filter → impute → variance filter → scale)."""
+        if self._preprocessor is None or self._miss_filter is None:
+            raise ValueError("Model has not been fitted yet.")
+        X_np = to_numpy(X).astype(float)
+        return self._preprocessor.transform(self._miss_filter.transform(X_np))
+
+    def get_hyperparams(self) -> dict[str, Any]:
+        if self._result is None:
+            raise ValueError("Model has not been fitted yet.")
+        return {
+            "var_random": float(self.var_random or 0.0),
+            "var_resid": float(self.var_resid or 0.0),
+            "icc": float(self.icc or 0.0),
+            "converged": self._converged,
+        }
+
+    def get_linear_model(self) -> _FixedEffectLinear:
+        """Return a sklearn-compatible wrapper around the fixed effects for SHAP."""
+        if self._result is None:
+            raise ValueError("Model has not been fitted yet.")
+        fe = self._result.fe_params.values
+        # Rescale from standardised target space back to original target space
+        coef = fe[1:] * self._y_std
+        intercept = float(fe[0] * self._y_std + self._y_mean)
+        return _FixedEffectLinear(coef_=coef, intercept_=intercept)
 
 
 @dataclass
@@ -961,6 +1279,7 @@ def train_and_explain(
 
     # Prepare groups
     groups = df.select(group_by).to_series()
+    plot_groups = df.select("plot_id").to_series()
 
     # Use Hierarchical Temporal Group CV to remove temporal autocorrelation in the splits
     if use_temporal_cv:
@@ -968,6 +1287,7 @@ def train_and_explain(
 
         temporal_cv = HierarchicalTimeGroupCV(
             log_level=logging.ERROR,
+            random_state=RANDOM_STATE,
         )
         splits = []
         for fold, (train_idx, test_idx) in enumerate(
@@ -1011,10 +1331,14 @@ def train_and_explain(
                 group_by=group_by,
                 cv=cv,
             )
-
+        elif model_type == "lmm":
+            estimator = MixedLMEstimator(
+                species=species,
+                group_by=group_by,
+            )
         else:
             raise ValueError(
-                f"Unknown estimator: {model_type}. Supported estimators are 'gbdt' and 'elasticnet'."
+                f"Unknown estimator: {model_type}. Supported: 'gbdt', 'elasticnet', 'lmm'."
             )
 
         print(f"Fold {fold + 1}/{cv}")
@@ -1024,15 +1348,30 @@ def train_and_explain(
             X_train,
             y_train,
             groups=to_numpy(groups[train_idx]) if groups is not None else None,
+            plot_groups=to_numpy(plot_groups[train_idx]),
             ablation=ablation,
             fold=fold,
         )
 
-        # Evaluate the model
-        r2_train = estimator.score(X_train, y_train)
-        r2_test = estimator.score(X_test, y_test)
-        rmse_train = estimator.rmse(X_train, y_train)
-        rmse_test = estimator.rmse(X_test, y_test)
+        # Evaluate the model.
+        # For LMM with tree-wise CV the same plot can appear in both train and
+        # test (different trees), so we add the per-plot BLUP to predictions.
+        # SHAP and y_pred storage always use fixed effects only (predict without
+        # plot_groups) so that LinearExplainer attribution remains consistent.
+        if isinstance(estimator, MixedLMEstimator) and group_by == "tree_id":
+            _pg_train = to_numpy(plot_groups[train_idx])
+            _pg_test = to_numpy(plot_groups[test_idx])
+            _yhat_train = estimator.predict(X_train, plot_groups=_pg_train)
+            _yhat_test = estimator.predict(X_test, plot_groups=_pg_test)
+            r2_train = r2_score(y_train, _yhat_train)
+            r2_test = r2_score(y_test, _yhat_test)
+            rmse_train = float(root_mean_squared_error(to_numpy(y_train), _yhat_train))
+            rmse_test = float(root_mean_squared_error(to_numpy(y_test), _yhat_test))
+        else:
+            r2_train = estimator.score(X_train, y_train)
+            r2_test = estimator.score(X_test, y_test)
+            rmse_train = estimator.rmse(X_train, y_train)
+            rmse_test = estimator.rmse(X_test, y_test)
 
         # Update cross-validation results
         results.test_r2.append(r2_test)
@@ -1075,7 +1414,7 @@ def train_and_explain(
                 feature_names=X.columns,
                 feature_perturbation="tree_path_dependent",
             )
-        elif isinstance(estimator, ElasticNetEstimator):
+        elif isinstance(estimator, (ElasticNetEstimator, MixedLMEstimator)):
             X_bg_proc = estimator.transform(X_background)
             X_proc = estimator.transform(X)
             mask = estimator._var_mask
@@ -1084,8 +1423,13 @@ def train_and_explain(
                 if mask is not None
                 else X.columns
             )
+            linear_model = (
+                estimator.get_sklearn()
+                if isinstance(estimator, ElasticNetEstimator)
+                else estimator.get_linear_model()
+            )
             explainer = LinearExplainer(
-                estimator.get_sklearn(),
+                linear_model,
                 feature_names=feat_names_proc,
                 masker=IndependentMasker(X_bg_proc),
             )
@@ -1109,11 +1453,11 @@ def train_and_explain(
         else:
             raise ValueError(
                 f"Unsupported estimator type: {type(estimator)}. "
-                "Supported types are LGBMEstimator and ElasticNetEstimator."
+                "Supported types are LGBMEstimator, ElasticNetEstimator, MixedLMEstimator."
             )
 
         explainers.append(explainer)
-        if not isinstance(estimator, ElasticNetEstimator):
+        if not isinstance(estimator, (ElasticNetEstimator, MixedLMEstimator)):
             shap_values.append(explainer(X.to_numpy()))
 
     return ExperimentResults(

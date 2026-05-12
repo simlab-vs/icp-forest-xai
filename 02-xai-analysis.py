@@ -69,7 +69,9 @@ def _(joblib, mo, os, pl):
 
     # Filename pattern: results-{ablation}-{model_type}-{group_col}.pkl
     # ablation may contain hyphens, so anchor model_type and group_col from the right.
-    _pat = _re.compile(r"^results-(.+)-(gbdt|elasticnet)-(tree_id|plot_id|None)\.pkl$")
+    _pat = _re.compile(
+        r"^results-(.+)-(gbdt|elasticnet|lmm)-(tree_id|plot_id|None)-(temporal|standard)\.pkl$"
+    )
     _csv = "./cache/performance_summary.csv"
 
     # Remove if
@@ -81,16 +83,16 @@ def _(joblib, mo, os, pl):
         _m = _pat.match(os.path.basename(_path))
         if not _m:
             continue
-        _ablation, _model_type, _group_col_str = _m.groups()
+        _ablation, _model_type, _group_col_str, _tcv_str = _m.groups()
         _results = joblib.load(_path)
         _summarize(
             _results,
             ablation=_ablation,
             model_type=_model_type,
             group_col=_group_col_str,
-            use_temporal_cv=True,
+            use_temporal_cv=_tcv_str == "temporal",
         )
-        _loaded.append(f"{_model_type}/{_ablation}/{_group_col_str}")
+        _loaded.append(f"{_model_type}/{_ablation}/{_group_col_str}/{_tcv_str}")
 
     mo.stop(
         not _loaded,
@@ -100,7 +102,7 @@ def _(joblib, mo, os, pl):
         ),
     )
 
-    perf_df = pl.read_csv(_csv).filter(pl.col("temporal_cv") == "yes")
+    perf_df = pl.read_csv(_csv)
 
     mo.md(
         f"Loaded **{len(_loaded)}** cached run(s): {', '.join(f'`{r}`' for r in _loaded)}"
@@ -122,12 +124,16 @@ def _(mo, perf_df, pl):
         "plot-level-only": 2,
         "tree-level-only": 3,
     }
-    _MODEL_LABELS = {"gbdt": "GBDT", "elasticnet": "ElasticNet"}
+    _MODEL_LABELS = {
+        "gbdt": "GBDT",
+        "elasticnet": "ElasticNet",
+        "lmm": "Linear Mixed Effects",
+    }
 
     def build_paper_table(df: pl.DataFrame) -> pl.DataFrame:
         """Format a filtered performance DataFrame into a paper-ready R² table."""
         _r2_rows = df.filter(pl.col("split") == "test_r2").select(
-            "model", "ablation", "spruce", "pine", "beech", "oak"
+            "model", "ablation", "spruce", "pine", "oak", "beech"
         )
         # Weighted mean R² = Σ_species (n_species/n_total × R²_species)
         _weighted = df.filter(pl.col("split") == "test_weight_r2").select(
@@ -136,8 +142,8 @@ def _(mo, perf_df, pl):
             weighted_r2=(
                 pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
                 + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
-                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
                 + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
             )
             .round(2)
             .cast(pl.Utf8),
@@ -155,7 +161,11 @@ def _(mo, perf_df, pl):
                     ),
                     pl.lit(")"),
                 ),
-                _model_ord=pl.when(pl.col("model") == "gbdt").then(0).otherwise(1),
+                _model_ord=pl.when(pl.col("model") == "gbdt")
+                .then(0)
+                .when(pl.col("model") == "elasticnet")
+                .then(1)
+                .otherwise(2),
                 _ablation_ord=pl.col("ablation").map_elements(
                     lambda a: _ABLATION_ORDER.get(a, 99), return_dtype=pl.Int32
                 ),
@@ -174,14 +184,23 @@ def _(mo, perf_df, pl):
             .rename({"config": "Configuration"})
         )
 
-    _df_tree = perf_df.filter(pl.col("group_by") == "tree_id")
     mo.vstack(
         [
             mo.md(
-                "**Table 2**: R² test scores on 5-fold cross-validation grouped by tree identifiers."
+                "**Table 2**: R² test scores on 5-fold cross-validation grouped by tree identifiers "
+                + ("with" if temporal_cv == "yes" else "without")
+                + " temporal blocking"
             ),
-            mo.ui.table(build_paper_table(_df_tree)),
+            mo.ui.table(
+                build_paper_table(
+                    perf_df.filter(pl.col("group_by") == "tree_id").filter(
+                        pl.col("temporal_cv") == temporal_cv
+                    )
+                ),
+                page_size=20,
+            ),
         ]
+        for temporal_cv in ["yes", "no"]
     )
     return (build_paper_table,)
 
@@ -191,6 +210,35 @@ def _(build_paper_table, mo, perf_df, pl):
     _df_plot = perf_df.filter(
         (pl.col("group_by") == "plot_id") & (pl.col("ablation") == "all")
     )
+
+    mo.stop(
+        _df_plot.is_empty(),
+        mo.callout(
+            mo.md(
+                "No `plot_id` results found. "
+                "Run `uv run train.py --group-col plot_id --temporal-cv` for each model type."
+            ),
+            kind="info",
+        ),
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Table 3**: R² test scores on 5-fold cross-validation grouped by plot identifiers. "
+                "Best strictly positive score for each species is indicated in bold."
+            ),
+            mo.ui.table(build_paper_table(_df_plot)),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(build_paper_table, mo, perf_df, pl):
+    _df_plot = perf_df.filter(
+        (pl.col("group_by") == "tree_id") & (pl.col("ablation") == "all")
+    ).filter(pl.col("temporal_cv") == "no")
 
     mo.stop(
         _df_plot.is_empty(),
@@ -225,7 +273,9 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    model_type_ui = mo.ui.dropdown(["gbdt", "elasticnet"], value="gbdt", label="Model")
+    model_type_ui = mo.ui.dropdown(
+        ["gbdt", "elasticnet", "lmm"], value="gbdt", label="Model"
+    )
     ablation_ui = mo.ui.dropdown(
         ["all", "no-defoliation", "tree-level-only", "plot-level-only"],
         value="all",
@@ -241,7 +291,13 @@ def _(mo):
         [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
         gap=2,
     )
-    return ablation_ui, group_col_ui, model_type_ui, weight_shap_ui
+    return (
+        ablation_ui,
+        group_col_ui,
+        model_type_ui,
+        temporal_cv_ui,
+        weight_shap_ui,
+    )
 
 
 @app.cell
@@ -252,28 +308,39 @@ def _(
     mo,
     model_type_ui,
     os,
+    temporal_cv_ui,
     weight_shap_ui,
 ):
     model_type = model_type_ui.value
     ablation = ablation_ui.value
     group_col = None if group_col_ui.value == "none" else group_col_ui.value
+    use_temporal_cv = temporal_cv_ui.value
     weight_shap_fimp = weight_shap_ui.value
 
-    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}-{_tcv}.pkl"
+    _tcv_flag = "--temporal-cv" if use_temporal_cv else ""
     mo.stop(
         not os.path.exists(_results_path),
         mo.callout(
             mo.md(
                 f"No cached results at `{_results_path}`.\n\nRun `./train-all.sh` (or "
                 f"`uv run train.py --model-type {model_type} --ablation {ablation} "
-                f"--group-col {group_col or 'none'} --temporal-cv`) first."
+                f"--group-col {group_col or 'none'} {_tcv_flag}`) first."
             ),
             kind="warn",
         ),
     )
     all_results = joblib.load(_results_path)
     mo.md(f"Loaded **{len(all_results)} species** from `{_results_path}`")
-    return ablation, all_results, group_col, model_type, weight_shap_fimp
+    return (
+        ablation,
+        all_results,
+        group_col,
+        model_type,
+        use_temporal_cv,
+        weight_shap_fimp,
+    )
 
 
 @app.cell(hide_code=True)
@@ -285,8 +352,9 @@ def _(mo):
 
 
 @app.cell
-def _(ablation, group_col, mo, model_type, os, pl):
-    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+def _(ablation, group_col, mo, model_type, os, pl, use_temporal_cv):
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
 
     mo.stop(
         not os.path.exists(_hp_path),
@@ -313,7 +381,12 @@ def _(ablation, group_col, mo, model_type, os, pl):
                 for p in _param_cols
             ]
         )
+        .with_columns(
+            pl.col("species").cast(pl.Enum(["spruce", "pine", "oak", "beech"]))
+        )
         .sort("species")
+        .with_columns(pl.col("species").cast(pl.Utf8))
+        .transpose(column_names="species", include_header=True, header_name="Parameter")
     )
 
     mo.vstack(
@@ -327,8 +400,267 @@ def _(ablation, group_col, mo, model_type, os, pl):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo, model_type):
+    mo.stop(
+        model_type not in ("elasticnet", "lmm"),
+        mo.callout(
+            mo.md(
+                "Preprocessing drop report is only available for linear models (ElasticNet, LMM)."
+            ),
+            kind="info",
+        ),
+    )
+    mo.md("### Features dropped by preprocessing")
+    return
+
+
 @app.cell
-def _(ablation, all_results, cs, group_col, model_type, np, pl):
+def _(all_results, cs, mo, model_type, pl):
+    from models import ElasticNetEstimator, MixedLMEstimator as _MixedLMEstimator
+
+    mo.stop(model_type not in ("elasticnet", "lmm"))
+
+    _rows = []
+    for _species, _res in all_results.items():
+        _feat_names = _res.features
+        for _fold, _est in enumerate(_res.estimators):
+            if not isinstance(_est, (ElasticNetEstimator, _MixedLMEstimator)):
+                continue
+            _miss_mask = (
+                _est._miss_filter.get_support()
+            )  # True = kept after missingness filter
+            _var_mask = _est._var_mask  # True = kept after both filters
+            for _i, _feat in enumerate(_feat_names):
+                if not _miss_mask[_i]:
+                    _rows.append(
+                        {
+                            "species": _species,
+                            "fold": _fold,
+                            "feature": _feat,
+                            "reason": "missingness >50%",
+                        }
+                    )
+                elif not _var_mask[_i]:
+                    _rows.append(
+                        {
+                            "species": _species,
+                            "fold": _fold,
+                            "feature": _feat,
+                            "reason": "near-zero variance",
+                        }
+                    )
+
+    mo.stop(
+        not _rows,
+        mo.callout(
+            mo.md("No features were dropped by the preprocessing pipeline."),
+            kind="success",
+        ),
+    )
+
+    _dropped = pl.DataFrame(_rows)
+    num_folds = next(iter(all_results.values())).num_folds
+
+    # Aggregate: one row per (species, feature, reason), with fold count and list
+    dropped_features = (
+        _dropped.group_by("species", "feature", "reason")
+        .agg(
+            n_folds=pl.col("fold").n_unique(),
+            folds=pl.col("fold").sort().cast(pl.Utf8).implode().list.join(", "),
+        )
+        .sort("species", "reason", "feature")
+    )
+
+    # Cross-species summary: features dropped in every species × fold combination
+    _consistent = (
+        _dropped.group_by("feature", "reason", "species")
+        .agg(n_folds=pl.col("fold").n_unique())
+        .filter(pl.col("n_folds") > 0)
+        .sort("reason", "feature")
+        .pivot(on="species", values="n_folds")
+        .pipe(
+            lambda df: df.select(
+                pl.col("feature"),
+                pl.col("reason"),
+                *[
+                    pl.col(s) / num_folds * 100
+                    for s in ["spruce", "pine", "oak", "beech"]
+                    if s in df.columns
+                ],
+                pl.mean_horizontal(cs.numeric().fill_null(0) / num_folds * 100).alias(
+                    "total [%]"
+                ),
+            )
+        )
+        .sort(by=cs.contains("total"), descending=True)
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                f"Features dropped in at least one CV fold (out of {num_folds}) "
+                "by the missingness filter (>50% missing) or near-zero variance filter."
+            ),
+            mo.ui.table(dropped_features),
+            mo.md(
+                f"**Consistently dropped** across all species and folds "
+                f"({len(_consistent)} feature(s)):"
+            ),
+            mo.ui.table(_consistent) if len(_consistent) else mo.md("_None_"),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, model_type):
+    mo.stop(
+        model_type != "lmm",
+        mo.callout(
+            mo.md(
+                "Variance components and ICC are only available for the **LMM** model."
+            ),
+            kind="info",
+        ),
+    )
+    mo.md("### Variance components (LMM)")
+    return
+
+
+@app.cell
+def _(
+    ablation,
+    all_results,
+    group_col,
+    mo,
+    model_type,
+    np,
+    os,
+    pl,
+    use_temporal_cv,
+):
+    mo.stop(model_type != "lmm")
+
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    _hp_path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
+    mo.stop(
+        not os.path.exists(_hp_path),
+        mo.callout(
+            mo.md(f"`{_hp_path}` not found — re-run training first."), kind="warn"
+        ),
+    )
+
+    _hp = pl.read_parquet(_hp_path)
+
+    # Per-fold R² / RMSE from already-loaded all_results
+    _perf_fold = pl.DataFrame(
+        [
+            {
+                "species": sp,
+                "fold": fold,
+                "R²": float(f["test_r2"]),
+                "RMSE": float(f["test_rmse"]),
+            }
+            for sp, res in all_results.items()
+            for fold, f in enumerate(res.performances)
+        ]
+    )
+
+    # Per-fold table: variance components + performance
+    _per_fold = (
+        _hp.select("species", "fold", "var_random", "var_resid", "icc", "converged")
+        .sort("species", "fold")
+        .join(_perf_fold, on=["species", "fold"], how="left")
+    )
+
+    # Summary table: mean ± std across folds for ICC, R², RMSE
+    _perf_summary = (
+        pl.DataFrame(
+            [
+                {
+                    "species": sp,
+                    "r2_mean": float(np.mean([f["test_r2"] for f in res.performances])),
+                    "r2_std": float(np.std([f["test_r2"] for f in res.performances])),
+                    "rmse_mean": float(
+                        np.mean([f["test_rmse"] for f in res.performances])
+                    ),
+                    "rmse_std": float(
+                        np.std([f["test_rmse"] for f in res.performances])
+                    ),
+                }
+                for sp, res in all_results.items()
+            ]
+        )
+        .with_columns(
+            R2=pl.concat_str(
+                pl.col("r2_mean").round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("r2_std").round(3).cast(pl.Utf8),
+            ),
+            RMSE=pl.concat_str(
+                pl.col("rmse_mean").round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("rmse_std").round(3).cast(pl.Utf8),
+            ),
+        )
+        .select("species", "R2", "RMSE")
+    )
+
+    icc_summary = (
+        _hp.group_by("species")
+        .agg(
+            var_random=pl.col("var_random").mean().round(4),
+            var_resid=pl.col("var_resid").mean().round(4),
+            icc=pl.concat_str(
+                pl.col("icc").mean().round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("icc").std().round(3).cast(pl.Utf8),
+            ),
+            converged=pl.col("converged").all(),
+        )
+        .rename(
+            {
+                "var_random": "σ²_u (between-plot)",
+                "var_resid": "σ²_e (within-plot)",
+                "icc": "ICC (mean ± std)",
+            }
+        )
+        .join(_perf_summary, on="species", how="left")
+        .with_columns(
+            pl.col("species").cast(pl.Enum(["spruce", "pine", "oak", "beech"]))
+        )
+        .sort("species")
+        .with_columns(pl.col("species").cast(pl.Utf8))
+        .transpose(column_names="species", include_header=True, header_name="Metric")
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Intraclass correlation coefficient** ICC = σ²_u / (σ²_u + σ²_e): "
+                "proportion of total variance attributable to between-plot differences. "
+                "Mean ± std across 5 CV folds."
+            ),
+            mo.ui.table(icc_summary),
+            mo.md("**Per-fold values**"),
+            mo.ui.table(_per_fold),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(
+    ablation,
+    all_results,
+    cs,
+    group_col,
+    model_type,
+    np,
+    pl,
+    use_temporal_cv,
+):
     feature_importances = pl.from_dicts(
         [
             {
@@ -352,8 +684,9 @@ def _(ablation, all_results, cs, group_col, model_type, np, pl):
         value_name="shap",
     )
 
+    _tcv = "temporal" if use_temporal_cv else "standard"
     feature_importances.write_parquet(
-        f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
+        f"./cache/feature_importances-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     )
     feature_importances
     return (feature_importances,)
@@ -487,8 +820,11 @@ def _(
         else "Feature importance (mean |SHAP| %)"
     )
     plt.ylabel("Feature")
+    _model_label = {"gbdt": "GBDT", "elasticnet": "ElasticNet", "lmm": "LMM"}.get(
+        model_type, model_type
+    )
     plt.title(
-        f"Feature importance ({'GBDT' if model_type == 'gbdt' else 'ElasticNet'}, "
+        f"Feature importance ({_model_label}, "
         f"{'all features' if ablation == 'all' else 'w/o defoliation'})"
     )
     plt.savefig(
@@ -508,10 +844,20 @@ def _(mo):
 
 
 @app.cell
-def _(ablation, feature_importances, group_col, mo, model_type, os, pl):
+def _(
+    ablation,
+    feature_importances,
+    group_col,
+    mo,
+    model_type,
+    os,
+    pl,
+    use_temporal_cv,
+):
     _other = "no-defoliation" if ablation == "all" else "all"
+    _tcv = "temporal" if use_temporal_cv else "standard"
     _other_path = (
-        f"./cache/feature_importances-{_other}-{model_type}-{group_col}.parquet"
+        f"./cache/feature_importances-{_other}-{model_type}-{group_col}-{_tcv}.parquet"
     )
 
     mo.stop(
@@ -816,8 +1162,399 @@ def _(ALL_SPECIES, all_results, np, plt):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## SHAP Ranking Stability
+
+    How consistent are feature importance rankings when the cross-validation strategy changes?
+    Two comparisons are made for the currently selected model using the "all features" ablation:
+
+    - **Temporal blocking**: `temporal` CV vs standard k-fold (both using `tree_id` grouping)
+    - **Spatial blocking**: `plot_id` grouping vs `tree_id` grouping (both using standard CV)
+
+    A Spearman ρ close to 1 means rankings are unaffected by the choice of blocking strategy.
+    """)
+    return
+
+
+@app.cell
+def _(FEATURES_METADATA, mo, model_type, os, pl):
+    def _load_ranks(group_col, tcv):
+        _path = (
+            f"./cache/feature_importances-all-{model_type}-{group_col}-{tcv}.parquet"
+        )
+        if not os.path.exists(_path):
+            return None
+        _label_map = pl.from_dicts(
+            [{"feature": k, "label": v["label"]} for k, v in FEATURES_METADATA.items()]
+        )
+        return (
+            pl.read_parquet(_path)
+            .group_by("species", "feature")
+            .agg(shap_mean=pl.col("shap").mean())
+            .with_columns(
+                rank=pl.col("shap_mean")
+                .rank(descending=True, method="dense")
+                .over("species")
+                .cast(pl.Int32)
+            )
+            .join(_label_map, on="feature", how="left")
+            .with_columns(label=pl.col("label").fill_null(pl.col("feature")))
+        )
+
+    def _load_ranks_per_fold(group_col, tcv):
+        _path = (
+            f"./cache/feature_importances-all-{model_type}-{group_col}-{tcv}.parquet"
+        )
+        if not os.path.exists(_path):
+            return None
+        return (
+            pl.read_parquet(_path)
+            .with_columns(
+                rank=pl.col("shap")
+                .rank(descending=True, method="dense")
+                .over(["species", "fold"])
+                .cast(pl.Int32)
+            )
+            .select("species", "fold", "feature", "rank")
+        )
+
+    shap_stability_data = {
+        "tree_temporal": _load_ranks("tree_id", "temporal"),
+        "tree_standard": _load_ranks("tree_id", "standard"),
+        "plot_standard": _load_ranks("plot_id", "standard"),
+    }
+    shap_stability_data_folds = {
+        "tree_temporal": _load_ranks_per_fold("tree_id", "temporal"),
+        "tree_standard": _load_ranks_per_fold("tree_id", "standard"),
+        "plot_standard": _load_ranks_per_fold("plot_id", "standard"),
+    }
+
+    mo.stop(
+        all(v is None for v in shap_stability_data.values()),
+        mo.callout(
+            mo.md(
+                f"No stability data found for `{model_type}`. Run `./train-all.sh` first."
+            ),
+            kind="warn",
+        ),
+    )
+    return shap_stability_data, shap_stability_data_folds
+
+
+@app.cell
+def _(
+    mo,
+    model_type,
+    pl,
+    plt,
+    shap_stability_data,
+    shap_stability_data_folds,
+    sns,
+):
+    from scipy.stats import spearmanr as _spearmanr
+
+    _tree_temporal = shap_stability_data["tree_temporal"]
+    _tree_standard = shap_stability_data["tree_standard"]
+    _plot_standard = shap_stability_data["plot_standard"]
+
+    # Each tuple: (title, df_a [y-axis], df_b [x-axis = standard], x_label, y_label)
+    _comparisons = []
+    if _tree_temporal is not None and _tree_standard is not None:
+        _comparisons.append(
+            (
+                "Temporal blocking\n(temporal vs standard CV)",
+                _tree_temporal,
+                _tree_standard,
+                "standard",
+                "temporal",
+            )
+        )
+    if _plot_standard is not None and _tree_standard is not None:
+        _comparisons.append(
+            (
+                "Spatial blocking\n(plot_id vs tree_id grouping)",
+                _plot_standard,
+                _tree_standard,
+                "standard",
+                "spatial",
+            )
+        )
+
+    mo.stop(
+        not _comparisons,
+        mo.callout(mo.md("Not enough data to compare CV strategies."), kind="info"),
+    )
+
+    _TOP_N = 10
+    _species_list = ["spruce", "pine", "oak", "beech"]
+    _fig, _axes = plt.subplots(
+        len(_comparisons),
+        len(_species_list),
+        figsize=(4 * len(_species_list), 4.5 * len(_comparisons)),
+        squeeze=False,
+    )
+
+    for _row_i, (_cmp_title, _df_a, _df_b, _label_b, _label_a) in enumerate(
+        _comparisons
+    ):
+        for _col_i, _sp in enumerate(_species_list):
+            _ax = _axes[_row_i, _col_i]
+            _a = _df_a.filter(pl.col("species") == _sp).select(
+                "feature", "label", pl.col("rank").alias("rank_a")
+            )
+            _b = _df_b.filter(pl.col("species") == _sp).select(
+                "feature", pl.col("rank").alias("rank_b")
+            )
+            # Restrict to top-N features as ranked by the standard baseline
+            _merged = _a.join(_b, on="feature", how="inner").filter(
+                pl.col("rank_b") <= _TOP_N
+            )
+
+            if len(_merged) < 3:
+                _ax.set_visible(False)
+                continue
+
+            _ra = _merged["rank_a"].to_numpy()
+            _rb = _merged["rank_b"].to_numpy()
+            _rho, _pval = _spearmanr(_ra, _rb)
+
+            _ax.scatter(_rb, _ra, alpha=0.55, s=25, color=sns.color_palette()[0])
+            for _r in _merged.iter_rows(named=True):
+                _ax.annotate(
+                    _r["label"],
+                    (_r["rank_b"], _r["rank_a"]),
+                    fontsize=6,
+                    ha="left",
+                    xytext=(3, 0),
+                    textcoords="offset points",
+                )
+            _lim = max(_ra.max(), _rb.max()) + 2
+            _ax.plot([1, _lim], [1, _lim], "k--", linewidth=0.8, alpha=0.5)
+            _ax.set_xlim(0.5, _lim)
+            _ax.set_ylim(0.5, _lim)
+            _ax.set_title(f"{_sp.capitalize()}  (ρ = {_rho:.3f})", fontsize=10)
+            _ax.set_xlabel(f"Rank ({_label_b})", fontsize=8)
+
+        _axes[_row_i, 0].set_ylabel(
+            f"{_cmp_title.split(chr(10))[0]}\nRank ({_label_a})", fontsize=9
+        )
+
+    _model_label = {"gbdt": "GBDT", "elasticnet": "ElasticNet", "lmm": "LMM"}.get(
+        model_type, model_type
+    )
+    _fig.suptitle(
+        f"SHAP ranking stability — {_model_label}  (X vs standard, top-{_TOP_N} features)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    plt.savefig(f"./figures/shap-stability-{model_type}.pdf", bbox_inches="tight")
+    plt.gca()
+
+    # Per-fold Spearman ρ restricted to features in the standard's top-N per fold
+    _fold_comparisons = [
+        (
+            "Temporal vs standard",
+            shap_stability_data_folds["tree_temporal"],
+            shap_stability_data_folds["tree_standard"],
+        ),
+        (
+            "Spatial vs standard",
+            shap_stability_data_folds["plot_standard"],
+            shap_stability_data_folds["tree_standard"],
+        ),
+    ]
+    _rho_fold_rows = []
+    for _cmp_label, _folds_a, _folds_b in _fold_comparisons:
+        if _folds_a is None or _folds_b is None:
+            continue
+        for _sp in _species_list:
+            for _fold in sorted(_folds_a["fold"].unique().to_list()):
+                _fa = _folds_a.filter(
+                    (pl.col("species") == _sp) & (pl.col("fold") == _fold)
+                ).select("feature", pl.col("rank").alias("rank_a"))
+                _fb = _folds_b.filter(
+                    (pl.col("species") == _sp) & (pl.col("fold") == _fold)
+                ).select("feature", pl.col("rank").alias("rank_b"))
+                # Keep only standard's top-N features
+                _m = _fa.join(
+                    _fb.filter(pl.col("rank_b") <= _TOP_N), on="feature", how="inner"
+                )
+                if len(_m) < 3:
+                    continue
+                _rho_f, _ = _spearmanr(_m["rank_a"].to_numpy(), _m["rank_b"].to_numpy())
+                _rho_fold_rows.append(
+                    {
+                        "comparison": _cmp_label,
+                        "species": _sp,
+                        "fold": _fold,
+                        "rho": float(_rho_f),
+                    }
+                )
+
+    _rho_df = (
+        pl.DataFrame(_rho_fold_rows)
+        if _rho_fold_rows
+        else pl.DataFrame(
+            {
+                "comparison": pl.Series([], dtype=pl.Utf8),
+                "species": pl.Series([], dtype=pl.Utf8),
+                "fold": pl.Series([], dtype=pl.Int32),
+                "rho": pl.Series([], dtype=pl.Float64),
+            }
+        )
+    )
+    _rho_wide = (
+        _rho_df.group_by("comparison", "species")
+        .agg(
+            rho_str=pl.concat_str(
+                pl.col("rho").mean().round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("rho").std().fill_null(0.0).round(3).cast(pl.Utf8),
+            )
+        )
+        .pivot(on="species", values="rho_str")
+        .rename({"comparison": "Comparison"})
+    )
+    _rename = {s: s.capitalize() for s in _species_list if s in _rho_wide.columns}
+    _ordered = ["Comparison"] + [
+        s.capitalize()
+        for s in ["spruce", "pine", "beech", "oak"]
+        if s in _rho_wide.columns
+    ]
+    shap_stability_rho = (
+        _rho_wide.rename(_rename)
+        .select(_ordered)
+        .with_columns(
+            pl.col("Comparison").cast(
+                pl.Enum(["Temporal vs standard", "Spatial vs standard"])
+            )
+        )
+        .sort("Comparison")
+        .with_columns(pl.col("Comparison").cast(pl.Utf8))
+    )
+
+    plt.show()
+    return (shap_stability_rho,)
+
+
+@app.cell
+def _(mo, shap_stability_rho):
+    mo.vstack(
+        [
+            mo.md(
+                "**Spearman ρ** (mean ± std across CV folds) of per-fold |SHAP| feature rankings "
+                "between each blocking strategy and the standard baseline. "
+                "ρ = 1 means identical ordering; low ρ indicates the blocking choice materially changes conclusions."
+            ),
+            mo.ui.table(shap_stability_rho),
+        ]
+    )
+    return
+
+
 @app.cell
 def _():
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## SHAP Curve Stability
+
+    For each species and each feature in the standard-baseline top-10 (by mean |SHAP|),
+    compare the binned SHAP dependence curve across blocking strategies:
+
+    - **Temporal vs standard**: temporal CV vs standard k-fold (both tree_id grouping)
+    - **Spatial vs standard**: plot_id grouping vs tree_id grouping (both standard CV)
+
+    **Spearman ρ** measures shape consistency; **normalized MAD** measures scale
+    consistency (MAD divided by the global SHAP std of that feature).
+
+    Features with ρ < 0.7 and normalized MAD > 0.3, plus the manuscript's key features,
+    get 3-panel instability plots saved to `./figures/`.
+    """)
+    return
+
+
+@app.cell
+def _(joblib, mo, model_type, os):
+    from explain import compute_shap_curve_stability as _compute_stability
+
+    _KEY_FEATURES = [
+        "defoliation_mean",
+        "dep_n_tot",
+        "dep_s_so4",
+        "social_class_min",
+        "soph_avg_age",
+    ]
+
+    def _load_pkl(group_col: str, tcv: str):
+        path = f"./cache/results-all-{model_type}-{group_col}-{tcv}.pkl"
+        return joblib.load(path) if os.path.exists(path) else None
+
+    _std = _load_pkl("tree_id", "standard")
+    _temporal = _load_pkl("tree_id", "temporal")
+    _spatial = _load_pkl("plot_id", "standard")
+
+    mo.stop(
+        _std is None,
+        mo.callout(
+            mo.md(
+                f"Standard results not found for `{model_type}`. "
+                "Run `./train-all.sh` first."
+            ),
+            kind="warn",
+        ),
+    )
+
+    shap_curve_stability = _compute_stability(
+        _std,
+        _temporal,
+        _spatial,
+        key_features=_KEY_FEATURES,
+        figures_dir="./figures",
+    )
+    shap_curve_stability.write_parquet("./cache/shap_curve_stability.parquet")
+
+    mo.md(
+        f"Stability analysis complete for **{model_type}** — "
+        f"{len(shap_curve_stability)} (species × feature × comparison) rows written to "
+        "`cache/shap_curve_stability.parquet`."
+    )
+    return (shap_curve_stability,)
+
+
+@app.cell
+def _(mo, pl, shap_curve_stability):
+    _flagged = shap_curve_stability.filter(
+        (pl.col("spearman_rho") < 0.7) & (pl.col("normalized_mad") > 0.3)
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Stability metrics** — Spearman ρ and normalized MAD per "
+                "species × feature × comparison, computed from the mean-across-folds "
+                "SHAP fingerprint. Sorted by ρ ascending within each comparison."
+            ),
+            mo.ui.table(
+                shap_curve_stability.sort(
+                    "comparison", "spearman_rho", nulls_last=True
+                ),
+                page_size=10,
+            ),
+            mo.md(
+                f"**{len(_flagged)}** row(s) flagged as unstable "
+                "(ρ < 0.7 and normalized MAD > 0.3)."
+            ),
+            mo.ui.table(_flagged.sort("spearman_rho", nulls_last=True))
+            if len(_flagged)
+            else mo.callout(mo.md("No unstable features detected."), kind="success"),
+        ]
+    )
     return
 
 

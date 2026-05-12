@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         default="gbdt",
-        choices=["gbdt", "elasticnet"],
+        choices=["gbdt", "elasticnet", "lmm"],
         help="Model type (default: gbdt)",
     )
     parser.add_argument(
@@ -56,6 +56,16 @@ def parse_args() -> argparse.Namespace:
         "--temporal-cv",
         action="store_true",
         help="Use hierarchical temporal group CV",
+    )
+    parser.add_argument(
+        "--cache",
+        default="skip",
+        choices=["skip", "retrain", "scratch"],
+        help=(
+            "skip: do nothing if cached results already exist (default); "
+            "retrain: re-run CV while reusing cached hyperparameters; "
+            "scratch: re-run everything including hyperparameter search"
+        ),
     )
     return parser.parse_args()
 
@@ -108,6 +118,7 @@ def _save_hyperparams(
     ablation: str,
     model_type: str,
     group_col: str,
+    use_temporal_cv: bool,
 ) -> None:
     rows = []
     for species, results in all_results.items():
@@ -120,7 +131,8 @@ def _save_hyperparams(
     if not rows:
         return
 
-    path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}.parquet"
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    path = f"./cache/hyperparams-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     pl.DataFrame(rows).write_parquet(path)
     print(f"Hyperparameters saved to {path}")
 
@@ -132,11 +144,29 @@ def main() -> None:
     model_type: ModelType = args.model_type
     ablation: Ablation = args.ablation
     use_temporal_cv: bool = args.temporal_cv
+    cache_mode: str = args.cache
 
     os.makedirs("./cache", exist_ok=True)
 
+    _tcv = "temporal" if use_temporal_cv else "standard"
+    results_path = f"./cache/results-{ablation}-{model_type}-{group_col}-{_tcv}.pkl"
+
+    if cache_mode == "skip" and os.path.exists(results_path):
+        print(f"Skipping: cached results already exist at {results_path}")
+        return
+
+    if cache_mode == "scratch" and model_type == "gbdt":
+        temporal_label = (
+            "with_temp_blocking" if use_temporal_cv else "without_temp_blocking"
+        )
+        for _sp in ALL_SPECIES:
+            _study = f"./cache/study-{_sp}-{group_col}-{ablation}-{temporal_label}.pkl"
+            if os.path.exists(_study):
+                os.remove(_study)
+                print(f"Removed cached HP study: {_study}")
+
     print(
-        f"Config: model={model_type}, ablation={ablation}, group={group_col}, temporal_cv={use_temporal_cv}\n"
+        f"Config: model={model_type}, ablation={ablation}, group={group_col}, temporal_cv={use_temporal_cv}, cache={cache_mode}\n"
     )
 
     all_results: dict[Species, ExperimentResults] = {}
@@ -149,7 +179,6 @@ def main() -> None:
             use_temporal_cv=use_temporal_cv,
         )
 
-    results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
     joblib.dump(all_results, results_path)
     print(f"\nResults saved to {results_path}")
 
@@ -177,11 +206,11 @@ def main() -> None:
         value_name="shap",
     )
 
-    fi_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
+    fi_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
     feature_importances.write_parquet(fi_path)
     print(f"Feature importances saved to {fi_path}")
 
-    _save_hyperparams(all_results, ablation, model_type, group_col)
+    _save_hyperparams(all_results, ablation, model_type, group_col, use_temporal_cv)
 
     _print_summary(all_results)
 

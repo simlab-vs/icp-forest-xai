@@ -502,3 +502,473 @@ def compute_interaction_matrix(
         cbar.set_label("Mean absolute interaction value")
 
     return interactions, indices
+
+
+# ---------------------------------------------------------------------------
+# SHAP dependence curve stability across CV blocking strategies
+# ---------------------------------------------------------------------------
+
+_STRATEGY_COLORS = {
+    "standard": "#1f77b4",
+    "temporal": "#ff7f0e",
+    "spatial": "#2ca02c",
+}
+
+
+def _get_shap_arrays(
+    results: "Any",  # ExperimentResults — avoid circular import in type hint
+    feature: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Concatenate SHAP values and feature values for `feature` across all folds."""
+    shap_vals = np.concatenate(
+        [
+            results.shap_values[fold][:, feature].values
+            for fold in range(results.num_folds)
+        ]
+    ).astype(np.float64)
+    feat_vals = np.concatenate(
+        [
+            results.shap_values[fold][:, feature].data
+            for fold in range(results.num_folds)
+        ]
+    ).astype(np.float64)
+    return shap_vals, feat_vals
+
+
+def _quantile_edges(values: np.ndarray, n_bins: int = 10) -> np.ndarray:
+    """Compute n_bins+1 quantile-based bin edges from non-NaN values."""
+    valid = values[~np.isnan(values)]
+    if len(valid) == 0:
+        return np.linspace(0.0, 1.0, n_bins + 1)
+    return np.nanpercentile(valid, np.linspace(0.0, 100.0, n_bins + 1))
+
+
+def _binned_shap_mean_counts(
+    feat_vals: np.ndarray,
+    shap_vals: np.ndarray,
+    edges: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-bin mean SHAP and observation counts.
+
+    Returns arrays of length ``len(edges) - 1``; bins with no data are NaN / 0.
+    """
+    n_bins = len(edges) - 1
+    bin_means = np.full(n_bins, np.nan)
+    bin_counts = np.zeros(n_bins)
+
+    valid = ~np.isnan(feat_vals) & ~np.isnan(shap_vals)
+    if not valid.any():
+        return bin_means, bin_counts
+
+    fv, sv = feat_vals[valid], shap_vals[valid]
+    ids = np.searchsorted(edges[1:-1], fv, side="right")
+
+    for b in range(n_bins):
+        m = ids == b
+        if m.sum():
+            bin_means[b] = sv[m].mean()
+            bin_counts[b] = float(m.sum())
+
+    return bin_means, bin_counts
+
+
+def _binned_fold_envelope(
+    results: "Any",
+    feature: str,
+    edges: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute mean ± std of per-fold bin means and pooled observation counts.
+
+    The band is mean ± 1 std across folds, so it is always symmetric around
+    the reported mean line.  Using Q25/Q75 would NOT guarantee the mean falls
+    inside the band when the distribution of fold estimates is skewed.
+
+    Returns (bin_means, bin_lo, bin_hi, bin_counts).
+    """
+    n_bins = len(edges) - 1
+    fold_bin_means = []
+    pooled_counts = np.zeros(n_bins)
+
+    for fold in range(results.num_folds):
+        sv = results.shap_values[fold][:, feature].values.astype(np.float64)
+        fv = results.shap_values[fold][:, feature].data.astype(np.float64)
+        fm, fc = _binned_shap_mean_counts(fv, sv, edges)
+        fold_bin_means.append(fm)
+        pooled_counts += fc
+
+    fold_arr = np.stack(fold_bin_means, axis=0)  # shape: [n_folds, n_bins]
+    with np.errstate(all="ignore"), np.testing.suppress_warnings() as _sw:
+        _sw.filter(RuntimeWarning)
+        bin_means = np.nanmean(fold_arr, axis=0)
+        bin_std = np.nanstd(fold_arr, axis=0, ddof=0)
+
+    # NaN where all folds had no data in that bin
+    no_data = np.all(np.isnan(fold_arr), axis=0)
+    bin_means[no_data] = np.nan
+    bin_std[no_data] = np.nan
+
+    bin_lo = bin_means - bin_std
+    bin_hi = bin_means + bin_std
+
+    return bin_means, bin_lo, bin_hi, pooled_counts
+
+
+def _plot_shap_stability_figure(
+    species: str,
+    feature_raw: str,
+    feature_label: str,
+    panels: list[tuple[str, str, np.ndarray, np.ndarray, np.ndarray]],
+    bin_centers: np.ndarray,
+    bin_widths: np.ndarray,
+    obs_counts: np.ndarray,
+    figures_dir: str,
+    stability_metrics: dict[str, tuple[float, float]] | None = None,
+) -> None:
+    """Save a multi-panel SHAP dependence stability figure.
+
+    Parameters
+    ----------
+    feature_raw
+        Raw feature column name — used for the output filename.
+    feature_label
+        Human-readable feature name with unit, e.g. ``"Mean defoliation [%]"``
+        — used for axis labels and the figure title.
+    panels
+        Each entry is ``(strategy_title, color, fp_means, fp_q25, fp_q75)``.
+    stability_metrics
+        Maps strategy_title → (spearman_rho, normalized_mad) for non-baseline
+        panels.  Absent keys (e.g. the standard panel) get no metric annotation.
+    obs_counts
+        Per-bin observation counts from the full (unfolded) dataset — used for
+        the frequency histogram inset.
+    """
+    n_panels = len(panels)
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.5 * n_panels, 5.5), squeeze=False)
+
+    # Shared y limits derived from all Q25/Q75 bands
+    all_band_vals: list[np.ndarray] = []
+    for _, _, _, q25, q75 in panels:
+        all_band_vals.extend([q25[~np.isnan(q25)], q75[~np.isnan(q75)]])
+    if any(v.size for v in all_band_vals):
+        combined = np.concatenate(all_band_vals)
+        ymin, ymax = combined.min(), combined.max()
+        pad = 0.08 * (ymax - ymin) if ymax > ymin else 0.1
+        ylim: tuple[float, float] = (ymin - pad, ymax + pad)
+    else:
+        ylim = (-1.0, 1.0)
+
+    sm = stability_metrics or {}
+
+    for i, (title, color, fp_means, fp_q25, fp_q75) in enumerate(panels):
+        ax = axes[0, i]
+        valid = ~np.isnan(fp_means)
+        x, y = bin_centers[valid], fp_means[valid]
+        q25, q75 = fp_q25[valid], fp_q75[valid]
+
+        ax.plot(x, y, color=color, linewidth=2)
+        ax.fill_between(x, q25, q75, alpha=0.25, color=color, linewidth=0)
+        ax.axhline(0, color="grey", linestyle="--", linewidth=0.8)
+
+        panel_title = f"{species.capitalize()} — {title}"
+        if title in sm:
+            rho, mad = sm[title]
+            rho_str = f"{rho:.3f}" if np.isfinite(rho) else "n/a"
+            mad_str = f"{mad:.3f}" if np.isfinite(mad) else "n/a"
+            panel_title += f"\nρ = {rho_str},  norm. MAD = {mad_str}"
+        ax.set_title(panel_title, fontsize=9)
+
+        ax.set_xlabel(feature_label)
+        ax.set_ylim(ylim)
+        ax.xaxis.grid(True, linestyle="--", alpha=0.4)
+        if i == 0:
+            ax.set_ylabel("Mean SHAP value")
+
+        # Observation frequency histogram inset (shared x-axis, bottom 20%)
+        ax2 = ax.inset_axes((0, 0, 1.0, 0.2), zorder=0, sharex=ax, frame_on=False)
+        ax2.tick_params(
+            axis="both",
+            which="both",
+            bottom=False,
+            top=False,
+            left=False,
+            right=False,
+            labelbottom=False,
+            labelleft=False,
+        )
+        ax2.bar(
+            bin_centers, obs_counts, width=bin_widths * 0.8, color="grey", alpha=0.35
+        )
+
+    fig.suptitle(f"SHAP curve stability — {feature_label}", fontsize=11)
+    fig.tight_layout()
+
+    safe_sp = species.replace(" ", "_")
+    safe_ft = feature_raw.replace("/", "_").replace(" ", "_")
+    fig.savefig(
+        os.path.join(figures_dir, f"shap_curve_instability_{safe_sp}_{safe_ft}.png"),
+        dpi=150,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def compute_shap_curve_stability(
+    results_standard: dict[str, Any],
+    results_temporal: dict[str, Any] | None,
+    results_spatial: dict[str, Any] | None,
+    *,
+    n_bins: int = 10,
+    top_n: int = 10,
+    figures_dir: str = "./figures",
+    key_features: list[str] | None = None,
+    rho_threshold: float = 0.7,
+    mad_threshold: float = 0.3,
+) -> pl.DataFrame:
+    """Compute SHAP dependence curve stability across CV blocking strategies.
+
+    For each (species, top-*n* feature) pair, bins feature values into *n_bins*
+    quantile bins (computed once from the full dataset under the standard baseline),
+    computes the per-bin mean SHAP fingerprint for each blocking strategy, then
+    measures:
+
+    - **Spearman ρ** between the standard and alternative fingerprint vectors
+      (shape consistency).
+    - **Normalized MAD** = MAD of the two fingerprint vectors divided by the
+      global SHAP standard deviation of that feature (scale-free magnitude
+      consistency).
+
+    Generates 3-panel dependence plots for features where Spearman ρ < *rho_threshold*
+    or normalized MAD > *mad_threshold*, and unconditionally for *key_features*.
+
+    Parameters
+    ----------
+    results_standard
+        ``{species: ExperimentResults}`` from the standard (tree_id, no temporal)
+        blocking strategy.
+    results_temporal
+        Same dict for temporal blocking, or ``None`` if unavailable.
+    results_spatial
+        Same dict for spatial (plot_id) blocking, or ``None`` if unavailable.
+    n_bins
+        Number of quantile bins for the dependence curve fingerprint.
+    top_n
+        Number of top features (by mean |SHAP| under the standard baseline) to
+        include in the stability analysis per species.
+    figures_dir
+        Directory in which to save instability plots.
+    key_features
+        Feature names for which 3-panel plots are always generated regardless of
+        stability metrics.
+    rho_threshold
+        Spearman ρ below which a feature is flagged as unstable.
+    mad_threshold
+        Normalized MAD above which a feature is flagged as unstable.
+
+    Returns
+    -------
+    Polars DataFrame with columns: species, feature, comparison, spearman_rho,
+    normalized_mad.
+    """
+    from scipy.stats import spearmanr
+    from config import FEATURES_METADATA as _feat_meta
+
+    os.makedirs(figures_dir, exist_ok=True)
+    key_features = list(key_features or [])
+
+    # Ordered list of (comparison_label, results_dict, color, panel_title)
+    alt_strategies: list[tuple[str, dict[str, Any] | None, str, str]] = [
+        (
+            "temporal vs standard",
+            results_temporal,
+            _STRATEGY_COLORS["temporal"],
+            "Temporal blocking",
+        ),
+        (
+            "spatial vs standard",
+            results_spatial,
+            _STRATEGY_COLORS["spatial"],
+            "Spatial blocking",
+        ),
+    ]
+
+    rows: list[dict[str, object]] = []
+
+    for species, std_res in results_standard.items():
+        # ── 1. Top-n features by mean |SHAP| across all folds (standard baseline) ──
+        all_shap_std = np.concatenate(
+            [std_res.shap_values[fold].values for fold in range(std_res.num_folds)]
+        )
+        mean_abs = np.abs(all_shap_std).mean(axis=0)
+        top_idxs = np.argsort(mean_abs)[::-1][:top_n]
+        top_features: list[str] = [std_res.features[i] for i in top_idxs]
+
+        extra_key = [
+            f for f in key_features if f in std_res.features and f not in top_features
+        ]
+        all_features = top_features + extra_key
+
+        # ── 2. Compute fingerprints for every (feature, strategy) pair ──
+        # fp_cache[feature][strategy_name] = {means, q25, q75, counts}
+        # fp_cache[feature]["edges"]          = the shared bin edges
+        # fp_cache[feature]["global_shap_std"] = std of SHAP under standard
+        fp_cache: dict[str, dict[str, Any]] = {}
+
+        for feature in all_features:
+            feat_col = std_res.X[feature].to_numpy()
+            edges = _quantile_edges(feat_col, n_bins)
+
+            # Mean fingerprint from concatenated SHAP (for stability metric comparison)
+            shap_std, _ = _get_shap_arrays(std_res, feature)
+            # Envelope from per-fold bin means (keeps Q25/Q75 centered on the mean)
+            fp_m, fp_q25, fp_q75, fp_c = _binned_fold_envelope(std_res, feature, edges)
+
+            fp_cache[feature] = {
+                "edges": edges,
+                "global_shap_std": float(np.nanstd(shap_std)) or 1.0,
+                "standard": dict(means=fp_m, q25=fp_q25, q75=fp_q75, counts=fp_c),
+            }
+
+            for cmp_name, alt_results, _, _ in alt_strategies:
+                if alt_results is None or species not in alt_results:
+                    continue
+                alt_res = alt_results[species]
+                am, aq25, aq75, ac = _binned_fold_envelope(alt_res, feature, edges)
+                fp_cache[feature][cmp_name] = dict(
+                    means=am, q25=aq25, q75=aq75, counts=ac
+                )
+
+        # ── 3. Stability metrics from the mean-across-folds fingerprint ──
+        unstable: set[str] = set()
+
+        for feature in top_features:
+            fp_std_means = fp_cache[feature]["standard"]["means"]
+            gstd = fp_cache[feature]["global_shap_std"]
+
+            for cmp_name, _, _, _ in alt_strategies:
+                if cmp_name not in fp_cache[feature]:
+                    continue
+                fp_alt_means = fp_cache[feature][cmp_name]["means"]
+                valid_mask = ~np.isnan(fp_std_means) & ~np.isnan(fp_alt_means)
+
+                rho_val = np.nan
+                mad_val = np.nan
+                if valid_mask.sum() >= 3:
+                    try:
+                        rho_val, _ = spearmanr(
+                            fp_std_means[valid_mask], fp_alt_means[valid_mask]
+                        )
+                    except Exception:
+                        rho_val = np.nan
+                    mad_val = (
+                        float(
+                            np.mean(
+                                np.abs(
+                                    fp_std_means[valid_mask] - fp_alt_means[valid_mask]
+                                )
+                            )
+                        )
+                        / gstd
+                    )
+                    if (
+                        np.isfinite(rho_val) and rho_val < rho_threshold
+                    ) or mad_val > mad_threshold:
+                        unstable.add(feature)
+
+                rows.append(
+                    {
+                        "species": species,
+                        "feature": feature,
+                        "comparison": cmp_name,
+                        "spearman_rho": float(rho_val),
+                        "normalized_mad": float(mad_val),
+                    }
+                )
+
+        # ── 4. Generate instability and key-feature plots ──
+        features_to_plot = unstable | (set(key_features) & set(std_res.features))
+
+        for feature in features_to_plot:
+            if feature not in fp_cache:
+                continue
+
+            cache = fp_cache[feature]
+            edges = cache["edges"]
+            gstd = cache["global_shap_std"]
+            bin_centers = (edges[:-1] + edges[1:]) / 2
+            bin_widths = edges[1:] - edges[:-1]
+
+            # Clean feature label and unit from config metadata
+            _meta = _feat_meta.get(feature, {})
+            _label: str = str(_meta.get("label", feature))
+            _unit: str | None = _meta.get("unit") or None
+            feature_label: str = f"{_label} [{_unit}]" if _unit else _label
+
+            # Observation frequency counts from the unfolded full dataset
+            feat_col = std_res.X[feature].to_numpy()
+            valid_obs = ~np.isnan(feat_col)
+            obs_ids = np.searchsorted(edges[1:-1], feat_col[valid_obs], side="right")
+            obs_counts = np.bincount(obs_ids, minlength=len(bin_centers)).astype(float)
+
+            # Per-panel stability metrics (ρ, normalized MAD) vs. the standard baseline
+            panel_metrics: dict[str, tuple[float, float]] = {}
+            fp_std_m = cache["standard"]["means"]
+            for cmp_name, _, _, panel_title in alt_strategies:
+                if cmp_name not in cache:
+                    continue
+                fp_alt_m = cache[cmp_name]["means"]
+                valid = ~np.isnan(fp_std_m) & ~np.isnan(fp_alt_m)
+                if valid.sum() >= 3:
+                    try:
+                        _rho, _ = spearmanr(fp_std_m[valid], fp_alt_m[valid])
+                    except Exception:
+                        _rho = np.nan
+                    _mad = (
+                        float(np.mean(np.abs(fp_std_m[valid] - fp_alt_m[valid]))) / gstd
+                    )
+                    panel_metrics[panel_title] = (float(_rho), float(_mad))
+
+            # Build panels: standard first, then available comparisons in order
+            panels: list[tuple[str, str, np.ndarray, np.ndarray, np.ndarray]] = [
+                (
+                    "Standard baseline",
+                    _STRATEGY_COLORS["standard"],
+                    cache["standard"]["means"],
+                    cache["standard"]["q25"],
+                    cache["standard"]["q75"],
+                ),
+            ]
+            for cmp_name, _, color, panel_title in alt_strategies:
+                if cmp_name in cache:
+                    d = cache[cmp_name]
+                    panels.append((panel_title, color, d["means"], d["q25"], d["q75"]))
+
+            _plot_shap_stability_figure(
+                species,
+                feature,
+                feature_label,
+                panels,
+                bin_centers,
+                bin_widths,
+                obs_counts,
+                figures_dir,
+                panel_metrics,
+            )
+
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "species": pl.Utf8,
+                "feature": pl.Utf8,
+                "comparison": pl.Utf8,
+                "spearman_rho": pl.Float64,
+                "normalized_mad": pl.Float64,
+            }
+        )
+
+    return pl.DataFrame(rows).select(
+        pl.col("species").cast(pl.Utf8),
+        pl.col("feature").cast(pl.Utf8),
+        pl.col("comparison").cast(pl.Utf8),
+        pl.col("spearman_rho").cast(pl.Float64),
+        pl.col("normalized_mad").cast(pl.Float64),
+    )
