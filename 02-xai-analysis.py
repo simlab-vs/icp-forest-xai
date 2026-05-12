@@ -1162,8 +1162,399 @@ def _(ALL_SPECIES, all_results, np, plt):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## SHAP Ranking Stability
+
+    How consistent are feature importance rankings when the cross-validation strategy changes?
+    Two comparisons are made for the currently selected model using the "all features" ablation:
+
+    - **Temporal blocking**: `temporal` CV vs standard k-fold (both using `tree_id` grouping)
+    - **Spatial blocking**: `plot_id` grouping vs `tree_id` grouping (both using standard CV)
+
+    A Spearman ρ close to 1 means rankings are unaffected by the choice of blocking strategy.
+    """)
+    return
+
+
+@app.cell
+def _(FEATURES_METADATA, mo, model_type, os, pl):
+    def _load_ranks(group_col, tcv):
+        _path = (
+            f"./cache/feature_importances-all-{model_type}-{group_col}-{tcv}.parquet"
+        )
+        if not os.path.exists(_path):
+            return None
+        _label_map = pl.from_dicts(
+            [{"feature": k, "label": v["label"]} for k, v in FEATURES_METADATA.items()]
+        )
+        return (
+            pl.read_parquet(_path)
+            .group_by("species", "feature")
+            .agg(shap_mean=pl.col("shap").mean())
+            .with_columns(
+                rank=pl.col("shap_mean")
+                .rank(descending=True, method="dense")
+                .over("species")
+                .cast(pl.Int32)
+            )
+            .join(_label_map, on="feature", how="left")
+            .with_columns(label=pl.col("label").fill_null(pl.col("feature")))
+        )
+
+    def _load_ranks_per_fold(group_col, tcv):
+        _path = (
+            f"./cache/feature_importances-all-{model_type}-{group_col}-{tcv}.parquet"
+        )
+        if not os.path.exists(_path):
+            return None
+        return (
+            pl.read_parquet(_path)
+            .with_columns(
+                rank=pl.col("shap")
+                .rank(descending=True, method="dense")
+                .over(["species", "fold"])
+                .cast(pl.Int32)
+            )
+            .select("species", "fold", "feature", "rank")
+        )
+
+    shap_stability_data = {
+        "tree_temporal": _load_ranks("tree_id", "temporal"),
+        "tree_standard": _load_ranks("tree_id", "standard"),
+        "plot_standard": _load_ranks("plot_id", "standard"),
+    }
+    shap_stability_data_folds = {
+        "tree_temporal": _load_ranks_per_fold("tree_id", "temporal"),
+        "tree_standard": _load_ranks_per_fold("tree_id", "standard"),
+        "plot_standard": _load_ranks_per_fold("plot_id", "standard"),
+    }
+
+    mo.stop(
+        all(v is None for v in shap_stability_data.values()),
+        mo.callout(
+            mo.md(
+                f"No stability data found for `{model_type}`. Run `./train-all.sh` first."
+            ),
+            kind="warn",
+        ),
+    )
+    return shap_stability_data, shap_stability_data_folds
+
+
+@app.cell
+def _(
+    mo,
+    model_type,
+    pl,
+    plt,
+    shap_stability_data,
+    shap_stability_data_folds,
+    sns,
+):
+    from scipy.stats import spearmanr as _spearmanr
+
+    _tree_temporal = shap_stability_data["tree_temporal"]
+    _tree_standard = shap_stability_data["tree_standard"]
+    _plot_standard = shap_stability_data["plot_standard"]
+
+    # Each tuple: (title, df_a [y-axis], df_b [x-axis = standard], x_label, y_label)
+    _comparisons = []
+    if _tree_temporal is not None and _tree_standard is not None:
+        _comparisons.append(
+            (
+                "Temporal blocking\n(temporal vs standard CV)",
+                _tree_temporal,
+                _tree_standard,
+                "standard",
+                "temporal",
+            )
+        )
+    if _plot_standard is not None and _tree_standard is not None:
+        _comparisons.append(
+            (
+                "Spatial blocking\n(plot_id vs tree_id grouping)",
+                _plot_standard,
+                _tree_standard,
+                "standard",
+                "spatial",
+            )
+        )
+
+    mo.stop(
+        not _comparisons,
+        mo.callout(mo.md("Not enough data to compare CV strategies."), kind="info"),
+    )
+
+    _TOP_N = 10
+    _species_list = ["spruce", "pine", "oak", "beech"]
+    _fig, _axes = plt.subplots(
+        len(_comparisons),
+        len(_species_list),
+        figsize=(4 * len(_species_list), 4.5 * len(_comparisons)),
+        squeeze=False,
+    )
+
+    for _row_i, (_cmp_title, _df_a, _df_b, _label_b, _label_a) in enumerate(
+        _comparisons
+    ):
+        for _col_i, _sp in enumerate(_species_list):
+            _ax = _axes[_row_i, _col_i]
+            _a = _df_a.filter(pl.col("species") == _sp).select(
+                "feature", "label", pl.col("rank").alias("rank_a")
+            )
+            _b = _df_b.filter(pl.col("species") == _sp).select(
+                "feature", pl.col("rank").alias("rank_b")
+            )
+            # Restrict to top-N features as ranked by the standard baseline
+            _merged = _a.join(_b, on="feature", how="inner").filter(
+                pl.col("rank_b") <= _TOP_N
+            )
+
+            if len(_merged) < 3:
+                _ax.set_visible(False)
+                continue
+
+            _ra = _merged["rank_a"].to_numpy()
+            _rb = _merged["rank_b"].to_numpy()
+            _rho, _pval = _spearmanr(_ra, _rb)
+
+            _ax.scatter(_rb, _ra, alpha=0.55, s=25, color=sns.color_palette()[0])
+            for _r in _merged.iter_rows(named=True):
+                _ax.annotate(
+                    _r["label"],
+                    (_r["rank_b"], _r["rank_a"]),
+                    fontsize=6,
+                    ha="left",
+                    xytext=(3, 0),
+                    textcoords="offset points",
+                )
+            _lim = max(_ra.max(), _rb.max()) + 2
+            _ax.plot([1, _lim], [1, _lim], "k--", linewidth=0.8, alpha=0.5)
+            _ax.set_xlim(0.5, _lim)
+            _ax.set_ylim(0.5, _lim)
+            _ax.set_title(f"{_sp.capitalize()}  (ρ = {_rho:.3f})", fontsize=10)
+            _ax.set_xlabel(f"Rank ({_label_b})", fontsize=8)
+
+        _axes[_row_i, 0].set_ylabel(
+            f"{_cmp_title.split(chr(10))[0]}\nRank ({_label_a})", fontsize=9
+        )
+
+    _model_label = {"gbdt": "GBDT", "elasticnet": "ElasticNet", "lmm": "LMM"}.get(
+        model_type, model_type
+    )
+    _fig.suptitle(
+        f"SHAP ranking stability — {_model_label}  (X vs standard, top-{_TOP_N} features)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    plt.savefig(f"./figures/shap-stability-{model_type}.pdf", bbox_inches="tight")
+    plt.gca()
+
+    # Per-fold Spearman ρ restricted to features in the standard's top-N per fold
+    _fold_comparisons = [
+        (
+            "Temporal vs standard",
+            shap_stability_data_folds["tree_temporal"],
+            shap_stability_data_folds["tree_standard"],
+        ),
+        (
+            "Spatial vs standard",
+            shap_stability_data_folds["plot_standard"],
+            shap_stability_data_folds["tree_standard"],
+        ),
+    ]
+    _rho_fold_rows = []
+    for _cmp_label, _folds_a, _folds_b in _fold_comparisons:
+        if _folds_a is None or _folds_b is None:
+            continue
+        for _sp in _species_list:
+            for _fold in sorted(_folds_a["fold"].unique().to_list()):
+                _fa = _folds_a.filter(
+                    (pl.col("species") == _sp) & (pl.col("fold") == _fold)
+                ).select("feature", pl.col("rank").alias("rank_a"))
+                _fb = _folds_b.filter(
+                    (pl.col("species") == _sp) & (pl.col("fold") == _fold)
+                ).select("feature", pl.col("rank").alias("rank_b"))
+                # Keep only standard's top-N features
+                _m = _fa.join(
+                    _fb.filter(pl.col("rank_b") <= _TOP_N), on="feature", how="inner"
+                )
+                if len(_m) < 3:
+                    continue
+                _rho_f, _ = _spearmanr(_m["rank_a"].to_numpy(), _m["rank_b"].to_numpy())
+                _rho_fold_rows.append(
+                    {
+                        "comparison": _cmp_label,
+                        "species": _sp,
+                        "fold": _fold,
+                        "rho": float(_rho_f),
+                    }
+                )
+
+    _rho_df = (
+        pl.DataFrame(_rho_fold_rows)
+        if _rho_fold_rows
+        else pl.DataFrame(
+            {
+                "comparison": pl.Series([], dtype=pl.Utf8),
+                "species": pl.Series([], dtype=pl.Utf8),
+                "fold": pl.Series([], dtype=pl.Int32),
+                "rho": pl.Series([], dtype=pl.Float64),
+            }
+        )
+    )
+    _rho_wide = (
+        _rho_df.group_by("comparison", "species")
+        .agg(
+            rho_str=pl.concat_str(
+                pl.col("rho").mean().round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("rho").std().fill_null(0.0).round(3).cast(pl.Utf8),
+            )
+        )
+        .pivot(on="species", values="rho_str")
+        .rename({"comparison": "Comparison"})
+    )
+    _rename = {s: s.capitalize() for s in _species_list if s in _rho_wide.columns}
+    _ordered = ["Comparison"] + [
+        s.capitalize()
+        for s in ["spruce", "pine", "beech", "oak"]
+        if s in _rho_wide.columns
+    ]
+    shap_stability_rho = (
+        _rho_wide.rename(_rename)
+        .select(_ordered)
+        .with_columns(
+            pl.col("Comparison").cast(
+                pl.Enum(["Temporal vs standard", "Spatial vs standard"])
+            )
+        )
+        .sort("Comparison")
+        .with_columns(pl.col("Comparison").cast(pl.Utf8))
+    )
+
+    plt.show()
+    return (shap_stability_rho,)
+
+
+@app.cell
+def _(mo, shap_stability_rho):
+    mo.vstack(
+        [
+            mo.md(
+                "**Spearman ρ** (mean ± std across CV folds) of per-fold |SHAP| feature rankings "
+                "between each blocking strategy and the standard baseline. "
+                "ρ = 1 means identical ordering; low ρ indicates the blocking choice materially changes conclusions."
+            ),
+            mo.ui.table(shap_stability_rho),
+        ]
+    )
+    return
+
+
 @app.cell
 def _():
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## SHAP Curve Stability
+
+    For each species and each feature in the standard-baseline top-10 (by mean |SHAP|),
+    compare the binned SHAP dependence curve across blocking strategies:
+
+    - **Temporal vs standard**: temporal CV vs standard k-fold (both tree_id grouping)
+    - **Spatial vs standard**: plot_id grouping vs tree_id grouping (both standard CV)
+
+    **Spearman ρ** measures shape consistency; **normalized MAD** measures scale
+    consistency (MAD divided by the global SHAP std of that feature).
+
+    Features with ρ < 0.7 and normalized MAD > 0.3, plus the manuscript's key features,
+    get 3-panel instability plots saved to `./figures/`.
+    """)
+    return
+
+
+@app.cell
+def _(joblib, mo, model_type, os):
+    from explain import compute_shap_curve_stability as _compute_stability
+
+    _KEY_FEATURES = [
+        "defoliation_mean",
+        "dep_n_tot",
+        "dep_s_so4",
+        "social_class_min",
+        "soph_avg_age",
+    ]
+
+    def _load_pkl(group_col: str, tcv: str):
+        path = f"./cache/results-all-{model_type}-{group_col}-{tcv}.pkl"
+        return joblib.load(path) if os.path.exists(path) else None
+
+    _std = _load_pkl("tree_id", "standard")
+    _temporal = _load_pkl("tree_id", "temporal")
+    _spatial = _load_pkl("plot_id", "standard")
+
+    mo.stop(
+        _std is None,
+        mo.callout(
+            mo.md(
+                f"Standard results not found for `{model_type}`. "
+                "Run `./train-all.sh` first."
+            ),
+            kind="warn",
+        ),
+    )
+
+    shap_curve_stability = _compute_stability(
+        _std,
+        _temporal,
+        _spatial,
+        key_features=_KEY_FEATURES,
+        figures_dir="./figures",
+    )
+    shap_curve_stability.write_parquet("./cache/shap_curve_stability.parquet")
+
+    mo.md(
+        f"Stability analysis complete for **{model_type}** — "
+        f"{len(shap_curve_stability)} (species × feature × comparison) rows written to "
+        "`cache/shap_curve_stability.parquet`."
+    )
+    return (shap_curve_stability,)
+
+
+@app.cell
+def _(mo, pl, shap_curve_stability):
+    _flagged = shap_curve_stability.filter(
+        (pl.col("spearman_rho") < 0.7) & (pl.col("normalized_mad") > 0.3)
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Stability metrics** — Spearman ρ and normalized MAD per "
+                "species × feature × comparison, computed from the mean-across-folds "
+                "SHAP fingerprint. Sorted by ρ ascending within each comparison."
+            ),
+            mo.ui.table(
+                shap_curve_stability.sort(
+                    "comparison", "spearman_rho", nulls_last=True
+                ),
+                page_size=10,
+            ),
+            mo.md(
+                f"**{len(_flagged)}** row(s) flagged as unstable "
+                "(ρ < 0.7 and normalized MAD > 0.3)."
+            ),
+            mo.ui.table(_flagged.sort("spearman_rho", nulls_last=True))
+            if len(_flagged)
+            else mo.callout(mo.md("No unstable features detected."), kind="success"),
+        ]
+    )
     return
 
 
