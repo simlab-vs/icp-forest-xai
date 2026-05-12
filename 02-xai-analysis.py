@@ -102,7 +102,7 @@ def _(joblib, mo, os, pl):
         ),
     )
 
-    perf_df = pl.read_csv(_csv).filter(pl.col("temporal_cv") == "yes")
+    perf_df = pl.read_csv(_csv)
 
     mo.md(
         f"Loaded **{len(_loaded)}** cached run(s): {', '.join(f'`{r}`' for r in _loaded)}"
@@ -180,18 +180,27 @@ def _(mo, perf_df, pl):
                     "weighted_r2": "Weighted R²",
                 }
             )
-            .select("config", "Spruce", "Pine", "Oak", "Beech", "Weighted R²")
+            .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted R²")
             .rename({"config": "Configuration"})
         )
 
-    _df_tree = perf_df.filter(pl.col("group_by") == "tree_id")
     mo.vstack(
         [
             mo.md(
-                "**Table 2**: R² test scores on 5-fold cross-validation grouped by tree identifiers."
+                "**Table 2**: R² test scores on 5-fold cross-validation grouped by tree identifiers "
+                + ("with" if temporal_cv == "yes" else "without")
+                + " temporal blocking"
             ),
-            mo.ui.table(build_paper_table(_df_tree)),
+            mo.ui.table(
+                build_paper_table(
+                    perf_df.filter(pl.col("group_by") == "tree_id").filter(
+                        pl.col("temporal_cv") == temporal_cv
+                    )
+                ),
+                page_size=20,
+            ),
         ]
+        for temporal_cv in ["yes", "no"]
     )
     return (build_paper_table,)
 
@@ -201,6 +210,35 @@ def _(build_paper_table, mo, perf_df, pl):
     _df_plot = perf_df.filter(
         (pl.col("group_by") == "plot_id") & (pl.col("ablation") == "all")
     )
+
+    mo.stop(
+        _df_plot.is_empty(),
+        mo.callout(
+            mo.md(
+                "No `plot_id` results found. "
+                "Run `uv run train.py --group-col plot_id --temporal-cv` for each model type."
+            ),
+            kind="info",
+        ),
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Table 3**: R² test scores on 5-fold cross-validation grouped by plot identifiers. "
+                "Best strictly positive score for each species is indicated in bold."
+            ),
+            mo.ui.table(build_paper_table(_df_plot)),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(build_paper_table, mo, perf_df, pl):
+    _df_plot = perf_df.filter(
+        (pl.col("group_by") == "tree_id") & (pl.col("ablation") == "all")
+    ).filter(pl.col("temporal_cv") == "no")
 
     mo.stop(
         _df_plot.is_empty(),
@@ -253,7 +291,13 @@ def _(mo):
         [model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui, weight_shap_ui],
         gap=2,
     )
-    return ablation_ui, group_col_ui, model_type_ui, temporal_cv_ui, weight_shap_ui
+    return (
+        ablation_ui,
+        group_col_ui,
+        model_type_ui,
+        temporal_cv_ui,
+        weight_shap_ui,
+    )
 
 
 @app.cell
@@ -485,7 +529,17 @@ def _(mo, model_type):
 
 
 @app.cell
-def _(ablation, all_results, group_col, mo, model_type, np, os, pl, use_temporal_cv):
+def _(
+    ablation,
+    all_results,
+    group_col,
+    mo,
+    model_type,
+    np,
+    os,
+    pl,
+    use_temporal_cv,
+):
     mo.stop(model_type != "lmm")
 
     _tcv = "temporal" if use_temporal_cv else "standard"
@@ -597,7 +651,16 @@ def _(ablation, all_results, group_col, mo, model_type, np, os, pl, use_temporal
 
 
 @app.cell
-def _(ablation, all_results, cs, group_col, model_type, np, pl, use_temporal_cv):
+def _(
+    ablation,
+    all_results,
+    cs,
+    group_col,
+    model_type,
+    np,
+    pl,
+    use_temporal_cv,
+):
     feature_importances = pl.from_dicts(
         [
             {
@@ -782,7 +845,14 @@ def _(mo):
 
 @app.cell
 def _(
-    ablation, feature_importances, group_col, mo, model_type, os, pl, use_temporal_cv
+    ablation,
+    feature_importances,
+    group_col,
+    mo,
+    model_type,
+    os,
+    pl,
+    use_temporal_cv,
 ):
     _other = "no-defoliation" if ablation == "all" else "all"
     _tcv = "temporal" if use_temporal_cv else "standard"

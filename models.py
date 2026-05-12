@@ -635,7 +635,7 @@ class ElasticNetEstimator(EstimatorProtocol):
             l1_ratio=_L1_RATIOS,
             alphas=alphas_grid,
             cv=cv_splits,
-            max_iter=100_000,
+            max_iter=10_000,
             tol=1e-3,
             random_state=self.random_state,
             verbose=False,
