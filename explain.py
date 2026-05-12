@@ -577,14 +577,13 @@ def _binned_fold_envelope(
     feature: str,
     edges: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute mean, Q25, Q75 of per-fold bin means and pooled counts.
+    """Compute mean ± std of per-fold bin means and pooled observation counts.
 
-    Q25/Q75 are derived from the distribution of per-fold bin means, so the
-    envelope captures model-to-model variability and is always centered on the
-    reported mean (unlike percentiles of the raw within-bin SHAP values, which
-    reflect skewed observation-level distributions).
+    The band is mean ± 1 std across folds, so it is always symmetric around
+    the reported mean line.  Using Q25/Q75 would NOT guarantee the mean falls
+    inside the band when the distribution of fold estimates is skewed.
 
-    Returns (bin_means, bin_q25, bin_q75, bin_counts).
+    Returns (bin_means, bin_lo, bin_hi, bin_counts).
     """
     n_bins = len(edges) - 1
     fold_bin_means = []
@@ -601,16 +600,17 @@ def _binned_fold_envelope(
     with np.errstate(all="ignore"), np.testing.suppress_warnings() as _sw:
         _sw.filter(RuntimeWarning)
         bin_means = np.nanmean(fold_arr, axis=0)
-        bin_q25 = np.nanpercentile(fold_arr, 25, axis=0)
-        bin_q75 = np.nanpercentile(fold_arr, 75, axis=0)
+        bin_std = np.nanstd(fold_arr, axis=0, ddof=0)
 
     # NaN where all folds had no data in that bin
     no_data = np.all(np.isnan(fold_arr), axis=0)
     bin_means[no_data] = np.nan
-    bin_q25[no_data] = np.nan
-    bin_q75[no_data] = np.nan
+    bin_std[no_data] = np.nan
 
-    return bin_means, bin_q25, bin_q75, pooled_counts
+    bin_lo = bin_means - bin_std
+    bin_hi = bin_means + bin_std
+
+    return bin_means, bin_lo, bin_hi, pooled_counts
 
 
 def _plot_shap_stability_figure(
