@@ -57,9 +57,9 @@ Data can be requested to the Program Co-ordinating Center of IPC Forests:
 ## Reproducing the results
 
 - Copy the data in Parquet format in the `./data/raw` directory.
-- Run the notebook `00-preprocessing.ipynb` to preprocess the raw data. This
-  will generate the tidy data in the `./data/tidy` directory.
-- You may then run the `01-explore.py` notebook to explore the data.
+- Run `01-explore.py` to explore the data. Preprocessing (`00-preprocessing.py`)
+  runs automatically on first launch if the tidy data is not yet present in
+  `./data/tidy`.
 - Finally, run the script `./train-all.sh`, which train all variants reported
   in the paper. Results are cached in the `./cache/` directory to avoid retraining models
   at each run.

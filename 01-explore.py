@@ -6,6 +6,19 @@ app = marimo.App()
 
 @app.cell
 def _():
+    import os
+    import subprocess
+
+    from config import DATA_PATH
+
+    tidy_path = os.path.join(DATA_PATH, "tidy", "cpf-level2_cleaned.parquet")
+    if not os.path.exists(tidy_path):
+        subprocess.run(["python", "00-preprocessing.py"], check=True)
+    return
+
+
+@app.cell
+def _():
     import polars as pl
     import polars.selectors as cs
     from typing import get_args
