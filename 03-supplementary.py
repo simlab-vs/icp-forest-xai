@@ -62,6 +62,163 @@ def _():
     )
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Performance Tables (RMSE)
+
+    RMSE counterparts to Tables 2–4 from the main analysis.
+    Use the selectors to switch between tree-level / plot-level grouping and temporal vs. standard cross-validation.
+    """)
+    return
+
+
+@app.cell
+def _(mo, os, pl):
+    _csv = "./cache/performance_summary.csv"
+    mo.stop(
+        not os.path.exists(_csv),
+        mo.callout(
+            mo.md(
+                "Performance summary not found. "
+                "Open and run `02-xai-analysis.py` first to generate "
+                "`./cache/performance_summary.csv`."
+            ),
+            kind="warn",
+        ),
+    )
+    perf_df = pl.read_csv(_csv)
+    return (perf_df,)
+
+
+@app.cell
+def _(mo):
+    rmse_group_col_ui = mo.ui.dropdown(
+        ["tree_id", "plot_id"], value="tree_id", label="Group by"
+    )
+    rmse_temporal_cv_ui = mo.ui.switch(value=False, label="Temporal CV")
+    mo.hstack([rmse_group_col_ui, rmse_temporal_cv_ui], gap=2)
+    return rmse_group_col_ui, rmse_temporal_cv_ui
+
+
+@app.cell
+def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
+    _ABLATION_LABELS = {
+        "all": "all features",
+        "no-defoliation": "no defoliation",
+        "plot-level-only": "plot-level features only",
+        "tree-level-only": "tree-level features only",
+    }
+    _ABLATION_ORDER = {
+        "all": 0,
+        "no-defoliation": 1,
+        "plot-level-only": 2,
+        "tree-level-only": 3,
+    }
+    _MODEL_LABELS = {
+        "gbdt": "GBDT",
+        "elasticnet": "ElasticNet",
+        "lmm": "Linear Mixed Effects",
+    }
+
+    def build_rmse_table(df: pl.DataFrame) -> pl.DataFrame:
+        _rmse_rows = df.filter(pl.col("split") == "test_rmse").select(
+            "model", "ablation", "spruce", "pine", "oak", "beech"
+        )
+        _weighted = df.filter(pl.col("split") == "test_weight_rmse").select(
+            "model",
+            "ablation",
+            weighted_rmse=(
+                pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
+                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
+            )
+            .round(2)
+            .cast(pl.Utf8),
+        )
+        return (
+            _rmse_rows.join(_weighted, on=["model", "ablation"], how="left")
+            .with_columns(
+                config=pl.concat_str(
+                    pl.col("model").map_elements(
+                        lambda m: _MODEL_LABELS.get(m, m), return_dtype=pl.Utf8
+                    ),
+                    pl.lit(" ("),
+                    pl.col("ablation").map_elements(
+                        lambda a: _ABLATION_LABELS.get(a, a), return_dtype=pl.Utf8
+                    ),
+                    pl.lit(")"),
+                ),
+                _model_ord=pl.when(pl.col("model") == "gbdt")
+                .then(0)
+                .when(pl.col("model") == "elasticnet")
+                .then(1)
+                .otherwise(2),
+                _ablation_ord=pl.col("ablation").map_elements(
+                    lambda a: _ABLATION_ORDER.get(a, 99), return_dtype=pl.Int32
+                ),
+            )
+            .sort("_model_ord", "_ablation_ord")
+            .rename(
+                {
+                    "spruce": "Spruce",
+                    "pine": "Pine",
+                    "beech": "Beech",
+                    "oak": "Oak",
+                    "weighted_rmse": "Weighted RMSE",
+                }
+            )
+            .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted RMSE")
+            .rename({"config": "Configuration"})
+        )
+
+    _group_col = rmse_group_col_ui.value
+    _tcv = "yes" if rmse_temporal_cv_ui.value else "no"
+    _is_plot = _group_col == "plot_id"
+
+    _df_sel = perf_df.filter(
+        (pl.col("group_by") == _group_col) & (pl.col("temporal_cv") == _tcv)
+    )
+    if _is_plot:
+        _df_sel = _df_sel.filter(pl.col("ablation") == "all")
+
+    mo.stop(
+        _df_sel.is_empty(),
+        mo.callout(
+            mo.md(
+                f"No data for group_by=`{_group_col}`, temporal_cv=`{_tcv}`. "
+                "Run `./train-all.sh` first."
+            ),
+            kind="info",
+        ),
+    )
+
+    _tcv_label = "with" if _tcv == "yes" else "without"
+    _group_label = "plot identifiers" if _is_plot else "tree identifiers"
+    if _is_plot:
+        _table_num = "Table 4 (RMSE)"
+        _caption = (
+            f"**{_table_num}**: RMSE test scores on 5-fold cross-validation grouped by "
+            "plot identifiers. Best strictly positive score for each species is indicated in bold."
+        )
+    else:
+        _table_num = "Table 2 (RMSE)" if _tcv == "no" else "Table 3 (RMSE)"
+        _caption = (
+            f"**{_table_num}**: RMSE test scores on 5-fold cross-validation grouped by "
+            f"tree identifiers {_tcv_label} temporal blocking for different ablation studies "
+            "on GBDT models and linear models, with different feature sets."
+        )
+
+    mo.vstack(
+        [
+            mo.md(_caption),
+            mo.ui.table(build_rmse_table(_df_sel), page_size=20),
+        ]
+    )
+    return (build_rmse_table,)
+
+
 @app.cell
 def _(mo):
     model_type_ui = mo.ui.dropdown(["gbdt", "elasticnet"], value="gbdt", label="Model")
