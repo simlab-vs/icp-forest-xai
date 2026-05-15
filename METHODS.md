@@ -119,7 +119,7 @@ because it is orders of magnitude faster than solving each
 
 Given the hyperparameters selected in §4.2, the final model for each
 outer fold is fitted using sklearn's **`ElasticNet`** (coordinate
-descent, `max_iter=100 000`). The high iteration cap ensures convergence
+descent, `max_iter=10 000`). The high iteration cap ensures convergence
 on the ill-conditioned feature subsets that can arise after temporal
 blocking removes large contiguous blocks of data.
 

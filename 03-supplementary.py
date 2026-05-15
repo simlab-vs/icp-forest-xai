@@ -30,11 +30,9 @@ def _():
     import polars as pl
     import polars.selectors as cs
     import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
     import seaborn as sns
     import networkx as nx
     import os
-    from matplotlib.colors import TwoSlopeNorm
     from sklearn.preprocessing import StandardScaler
     from sklearn.manifold import TSNE
 
@@ -43,18 +41,13 @@ def _():
     from explain import (
         compute_interaction_matrix,
         plot_ceteris_paribus_profile,
-        plot_dependence,
-        PlotType,
     )
 
     return (
         ALL_SPECIES,
         FEATURES_METADATA,
-        PlotType,
         StandardScaler,
         TSNE,
-        TwoSlopeNorm,
-        cm,
         compute_interaction_matrix,
         cs,
         joblib,
@@ -63,7 +56,6 @@ def _():
         os,
         pl,
         plot_ceteris_paribus_profile,
-        plot_dependence,
         plt,
         shap,
         sns,
@@ -81,17 +73,31 @@ def _(mo):
     group_col_ui = mo.ui.dropdown(
         ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
     )
-    mo.hstack([model_type_ui, ablation_ui, group_col_ui], gap=2)
-    return ablation_ui, group_col_ui, model_type_ui
+    temporal_cv_ui = mo.ui.switch(value=False, label="Temporal CV")
+    mo.hstack([model_type_ui, ablation_ui, group_col_ui, temporal_cv_ui], gap=2)
+    return ablation_ui, group_col_ui, model_type_ui, temporal_cv_ui
 
 
 @app.cell
-def _(ablation_ui, cs, group_col_ui, joblib, mo, model_type_ui, np, os, pl):
+def _(
+    ablation_ui,
+    cs,
+    group_col_ui,
+    joblib,
+    mo,
+    model_type_ui,
+    np,
+    os,
+    pl,
+    temporal_cv_ui,
+):
     model_type = model_type_ui.value
     ablation = ablation_ui.value
     group_col = None if group_col_ui.value == "none" else group_col_ui.value
+    use_temporal_cv = temporal_cv_ui.value
+    _tcv = "temporal" if use_temporal_cv else "standard"
 
-    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}.pkl"
+    _results_path = f"./cache/results-{ablation}-{model_type}-{group_col}-{_tcv}.pkl"
     mo.stop(
         not os.path.exists(_results_path),
         mo.callout(
@@ -130,7 +136,15 @@ def _(ablation_ui, cs, group_col_ui, joblib, mo, model_type_ui, np, os, pl):
     n_features = len(_last_res.features)
 
     mo.md(f"Loaded **{len(all_results)} species** from `{_results_path}`")
-    return ablation, all_results, feature_importances, group_col, model_type, n_features
+    return (
+        ablation,
+        all_results,
+        feature_importances,
+        group_col,
+        model_type,
+        n_features,
+        use_temporal_cv,
+    )
 
 
 @app.cell(hide_code=True)
@@ -221,20 +235,20 @@ def _(
     cs,
     feature_importances,
     group_col,
-    model_type,
     mo,
+    model_type,
     os,
     pl,
     plt,
     sns,
+    use_temporal_cv,
 ):
     _other = "no-defoliation" if ablation == "all" else "all"
+    _tcv = "temporal" if use_temporal_cv else "standard"
     _other_path = (
-        f"./cache/feature_importances-{_other}-{model_type}-{group_col}.parquet"
+        f"./cache/feature_importances-{_other}-{model_type}-{group_col}-{_tcv}.parquet"
     )
-    _this_path = (
-        f"./cache/feature_importances-{ablation}-{model_type}-{group_col}.parquet"
-    )
+    _this_path = f"./cache/feature_importances-{ablation}-{model_type}-{group_col}-{_tcv}.parquet"
 
     mo.stop(
         not os.path.exists(_other_path) or not os.path.exists(_this_path),
@@ -426,7 +440,7 @@ def _(all_results, cs, np, pl):
 
 
 @app.cell
-def _(df_shap, n_features, np, pl):
+def _(df_shap, n_features, pl):
     _D = n_features
     _comp_cols = [pl.col("shap").arr.get(i).alias(f"c{i}") for i in range(_D)]
     _dfc = df_shap.with_columns(_comp_cols).with_columns(
@@ -483,7 +497,7 @@ def _(df_shap, n_features, np, pl):
     )
 
     clustering_metrics
-    return (clustering_metrics,)
+    return
 
 
 @app.cell(hide_code=True)
