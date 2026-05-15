@@ -11,6 +11,14 @@ from enum import Enum
 from typing import Callable, cast, Any
 
 from models import EstimatorProtocol, ExperimentResults, Split
+from config import FEATURES_METADATA
+
+
+def _feature_label(feature: str) -> str:
+    meta = FEATURES_METADATA.get(feature, {})
+    label: str = meta.get("label") or feature
+    unit: str | None = meta.get("unit")
+    return f"{label} [{unit}]" if unit else label
 
 
 class PlotType(Enum):
@@ -98,7 +106,7 @@ def plot_dependence(
 
             feature_values = np.concatenate(
                 [
-                    results.shap_values[fold][:, feature].data
+                    results.get_shap_values(fold, "all")[:, feature].data
                     for fold in range(results.num_folds)
                 ],
                 dtype=np.float64,
@@ -119,7 +127,7 @@ def plot_dependence(
             shap_values = cast(np.ndarray, shap_struct).astype(np.float64)
 
             feature_values = cast(
-                np.ndarray, results.shap_values[fold][:, feature].data
+                np.ndarray, results.get_shap_values(fold, "all")[:, feature].data
             ).astype(np.float64)
 
     else:
@@ -295,7 +303,7 @@ def plot_dependence(
     ax.xaxis.grid(True, linestyle="--", alpha=0.5)
 
     ax.set_title(results.species.capitalize())
-    ax.set_xlabel(feature)
+    ax.set_xlabel(_feature_label(feature))
     ax.set_ylabel(y_label)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -374,7 +382,7 @@ def plot_ceteris_paribus_profile(
         alpha=1.0,
     )
 
-    ax.set_xlabel(feature)
+    ax.set_xlabel(_feature_label(feature))
     ax.set_ylabel("Predicted value")
 
     return feature_range, y_pred
