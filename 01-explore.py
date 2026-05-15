@@ -145,6 +145,7 @@ def _(FEATURES_METADATA, pl):
 
 @app.cell
 def _(df):
+
     # Compare absolute growth, growth rate, and relative growth rate (to diameter)
     df.select("growth", "growth_rate", "growth_rate_rel").describe()
     return
@@ -249,6 +250,11 @@ def _(df, pl, plt, sns):
     plt.title("Distribution of plots across orientations")
     plt.xticks(rotation=90)
     plt.show()
+    return
+
+
+@app.cell
+def _():
     return
 
 
