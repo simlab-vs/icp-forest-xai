@@ -216,7 +216,7 @@ def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
             mo.ui.table(build_rmse_table(_df_sel), page_size=20),
         ]
     )
-    return (build_rmse_table,)
+    return
 
 
 @app.cell
