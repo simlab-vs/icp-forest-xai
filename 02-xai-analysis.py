@@ -681,9 +681,8 @@ def _(ALL_SPECIES, FEATURES_METADATA, mo):
         value="all",
         label="Species",
     )
-    dep_original_space_ui = mo.ui.switch(value=False, label="Original space")
-    mo.hstack([dep_feature_ui, dep_species_ui, dep_original_space_ui], gap=2)
-    return dep_feature_ui, dep_original_space_ui, dep_species_ui
+    mo.hstack([dep_feature_ui, dep_species_ui], gap=2)
+    return dep_feature_ui, dep_species_ui
 
 
 @app.cell
@@ -691,14 +690,12 @@ def _(
     ALL_SPECIES,
     all_results,
     dep_feature_ui,
-    dep_original_space_ui,
     dep_species_ui,
     plot_dependence,
     plt,
 ):
     _feature = dep_feature_ui.value
     _species_sel = dep_species_ui.value
-    _use_original = dep_original_space_ui.value
     _species_list = ALL_SPECIES if _species_sel == "all" else [_species_sel]
 
     _n = len(_species_list)
@@ -711,13 +708,7 @@ def _(
             all_results[_sp],
             feature=_feature,
             alpha=0.3,
-            use_original_space=_use_original,
             ax=_ax,
-        )
-        _ax.set_title(_sp.capitalize())
-        _ax.set_xlabel(_feature)
-        _ax.set_ylabel(
-            "SHAP value" if _use_original else "SHAP value [percentile rank %]"
         )
 
     for _j in range(_i + 1, len(_axes.flatten())):

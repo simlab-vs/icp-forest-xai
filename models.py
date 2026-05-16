@@ -1080,7 +1080,11 @@ class ExperimentResults:
                 f"No SHAP values available for fold {fold}. "
                 "Ensure that the model was trained with SHAP explanations."
             )
-        used_idx = self.shap_row_indices[fold]
+        used_idx = (
+            self.shap_row_indices[fold]
+            if fold < len(self.shap_row_indices)
+            else np.arange(len(self.X))
+        )
         indices = self.get_indices(fold, split)
         mask = np.isin(used_idx, indices)
 
@@ -1171,7 +1175,28 @@ class ExperimentResults:
         self, fold: int, split: Split = "test"
     ) -> pl.DataFrame:
         """
-        Get SHAP values in the original space of the target variable for the given fold.
+        Return per-feature SHAP attributions in original growth-rate space (% yr⁻¹).
+
+        The model is trained on PIT-quantile targets ỹ = F_lognorm(log-RGR + 1),
+        so raw SHAP values φᵢ are expressed in quantile units.  A naive
+        back-transformation via the inverse PIT f⁻¹ is prediction-point dependent
+        and asymmetric.  We therefore use a symmetric finite difference:
+
+            δᵢ = f⁻¹(ŷ + φᵢ/2) − f⁻¹(ŷ − φᵢ/2)
+
+        This is a second-order accurate approximation of the true attribution in
+        original space, centred on the predicted quantile ŷ.  It coincides with
+        the first-order (asymmetric) estimator when φᵢ is small, and reduces
+        curvature bias when φᵢ is large (e.g. defoliation for spruce).
+
+        The base value in original space is set to f⁻¹(base_value), consistent
+        with the additivity property:
+
+            f⁻¹(base) + Σᵢ δᵢ ≈ f⁻¹(ŷ)    [to second order in φᵢ]
+
+        Note: exact additivity does not hold after the nonlinear back-transform;
+        the residual is O(φᵢ² · (f⁻¹)''(ŷ)) and is negligible for small SHAP
+        values but may be non-trivial for dominant features.
 
         Parameters
         ----------
@@ -1182,45 +1207,69 @@ class ExperimentResults:
 
         Returns
         -------
-        SHAP values in the original space.
+        pl.DataFrame
+            SHAP attributions in original space, shape (n_samples, n_features).
         """
+        if self.dist_params is None:
+            raise ValueError(
+                "dist_params is None. Cannot compute attributions in original space."
+            )
 
-        X, y_true, y_pred = self.get_data(fold, split)
-        shap_values = self.shap_values[fold].values
-        base_values = self.shap_values[fold].base_values
-        used_idx = self.shap_row_indices[fold]
+        # --- 1. Retrieve quantile-space predictions and SHAP values --------------
+        X, y_true, y_pred_series = self.get_data(fold, split)
+        y_pred = y_pred_series.to_numpy()
+
+        used_idx = (
+            self.shap_row_indices[fold]
+            if fold < len(self.shap_row_indices)
+            else np.arange(len(self.X))
+        )
         indices = self.get_indices(fold, split)
         mask = np.isin(used_idx, indices)
 
-        if self.dist_params is None:
-            raise ValueError(
-                "dist_params is None. Cannot compute importance in original space."
-            )
+        shap_values = np.asarray(
+            self.shap_values[fold].values[mask]
+        )  # (n_samples, n_features)
+        base_values = np.asarray(
+            self.shap_values[fold].base_values[mask]
+        )  # (n_samples,)
 
-        u_pred = base_values + shap_values.sum(axis=1)
-        u_pred = u_pred[mask]
-        # Check if SHAP reconstructs predictions
-        if not np.allclose(u_pred, y_pred, rtol=1e-6, atol=1e-6):
-            max_abs_err = np.max(np.abs(u_pred - y_pred))
-            mean_abs_err = np.mean(np.abs(u_pred - y_pred))
-
+        # --- 2. Verify SHAP additivity in quantile space -------------------------
+        u_pred_reconstructed = base_values + shap_values.sum(axis=1)
+        if not np.allclose(u_pred_reconstructed, y_pred, rtol=1e-6, atol=1e-6):
+            max_abs_err = np.max(np.abs(u_pred_reconstructed - y_pred))
+            mean_abs_err = np.mean(np.abs(u_pred_reconstructed - y_pred))
             logging.warning(
-                f"{self.species} fold {fold}: "
-                f"u_pred != y_pred "
-                f"(max abs err={max_abs_err:.6g}, "
-                f"mean abs err={mean_abs_err:.6g})"
+                f"{self.species} fold {fold}: SHAP additivity check failed "
+                f"(max_abs_err={max_abs_err:.6g}, mean_abs_err={mean_abs_err:.6g})"
             )
 
-        y_pred_orig = to_numpy(self.get_inverse_transform(y_pred, self.dist_params))
-        u_without = u_pred[:, None] - shap_values[mask]
-        n_samples, n_features = u_without.shape
-        y_without = to_numpy(
-            self.get_inverse_transform(pl.Series(u_without.ravel()), self.dist_params)
-        ).reshape(n_samples, n_features)
-        assert y_without.shape == u_without.shape
-        delta_abs = y_pred_orig[:, None] - y_without
+        # --- 3. Symmetric finite difference in quantile space --------------------
+        # u_plus[j, i]  = ŷⱼ + φᵢⱼ / 2
+        # u_minus[j, i] = ŷⱼ − φᵢⱼ / 2
+        u_pred = y_pred  # shape: (n_samples,)
+        half_shap = shap_values / 2.0  # (n_samples, n_features)
+        u_plus = u_pred[:, None] + half_shap  # (n_samples, n_features)
+        u_minus = u_pred[:, None] - half_shap  # (n_samples, n_features)
 
-        return pl.DataFrame(delta_abs, schema=self.features)
+        # --- 4. Apply inverse PIT to both endpoints ------------------------------
+        n_samples, n_features = shap_values.shape
+
+        dist_params = self.dist_params
+
+        def inv_transform_matrix(u_matrix: np.ndarray) -> np.ndarray:
+            flat = pl.Series(u_matrix.ravel())
+            return to_numpy(self.get_inverse_transform(flat, dist_params)).reshape(
+                n_samples, n_features
+            )
+
+        y_plus = inv_transform_matrix(u_plus)  # (n_samples, n_features)
+        y_minus = inv_transform_matrix(u_minus)  # (n_samples, n_features)
+
+        # --- 5. Symmetric attribution in original space --------------------------
+        delta = y_plus - y_minus  # (n_samples, n_features)
+
+        return pl.DataFrame(delta, schema=self.features)
 
 
 @dataclass
@@ -1457,6 +1506,7 @@ def train_and_explain(
             )
 
         explainers.append(explainer)
+        shap_row_indices.append(np.arange(len(X)))
         if not isinstance(estimator, (ElasticNetEstimator, MixedLMEstimator)):
             shap_values.append(explainer(X.to_numpy()))
 

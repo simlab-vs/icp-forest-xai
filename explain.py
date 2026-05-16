@@ -8,9 +8,17 @@ import seaborn as sns
 import os
 
 from enum import Enum
-from typing import Callable, cast, Any
+from typing import Callable, Sequence, cast, Any
 
 from models import EstimatorProtocol, ExperimentResults, Split
+from config import FEATURES_METADATA
+
+
+def _feature_label(feature: str) -> str:
+    meta = FEATURES_METADATA.get(feature, {})
+    label: str = meta.get("label") or feature
+    unit: str | None = meta.get("unit")
+    return f"{label} [{unit}]" if unit else label
 
 
 class PlotType(Enum):
@@ -25,7 +33,6 @@ def plot_dependence(
     fold: int | None = None,
     label: str | None = None,
     show_no_effect: bool = True,
-    use_original_space: bool = False,
     use_percentage: bool = True,
     fit_func: Callable | None = None,
     fit_p0: tuple[float, float, float] | None = None,
@@ -52,6 +59,8 @@ def plot_dependence(
         Label for the plot. If None, no label is set.
     show_no_effect
         Whether to show the line indicating no effect (default is True).
+    use_percentage
+        Whether to express SHAP values as percentile rank percentages.
     fit_func
         Function to fit a curve to the data (default is None).
     fit_p0
@@ -80,75 +89,29 @@ def plot_dependence(
     # If no alpha is provided, set it to 0.6
     kwargs.setdefault("alpha", 0.6)
 
-    y_label = "SHAP value"
-    if use_original_space:
-        y_label = y_label + " (original space)"
-    if use_percentage:
-        y_label = y_label + " [%]"
+    y_label = "SHAP value [%]" if use_percentage else "SHAP value"
 
-    if use_original_space:
-        if fold is None:
-            shap_values = np.concatenate(
-                [
-                    results.get_shap_values_orig_space(fold, "all")[feature].to_numpy()
-                    for fold in range(results.num_folds)
-                ],
-                dtype=np.float64,
-            )
-
-            feature_values = np.concatenate(
-                [
-                    results.shap_values[fold][:, feature].data
-                    for fold in range(results.num_folds)
-                ],
-                dtype=np.float64,
-            )
-            indices = np.concatenate(
-                [results.get_indices(fold, "all") for fold in range(results.num_folds)],
-                dtype=np.int64,
-            )
-        else:
-            shap_struct = results.get_shap_values_orig_space(fold, "all")[
-                feature
-            ].to_numpy()
-            assert shap_struct is not None, (
-                f"Feature '{feature}' not found in SHAP values for fold {fold}"
-            )
-
-            indices = results.get_indices(fold, "all")
-            shap_values = cast(np.ndarray, shap_struct).astype(np.float64)
-
-            feature_values = cast(
-                np.ndarray, results.shap_values[fold][:, feature].data
-            ).astype(np.float64)
-
+    if fold is None:
+        indices = np.arange(results.X.shape[0])
+        shap_values = np.concatenate(
+            [
+                results.shap_values[f][:, feature].values
+                for f in range(results.num_folds)
+            ],
+            dtype=np.float64,
+        )
+        feature_values = np.concatenate(
+            [results.shap_values[f][:, feature].data for f in range(results.num_folds)],
+            dtype=np.float64,
+        )
     else:
-        if fold is None:
-            indices = np.arange(results.X.shape[0])
-            shap_values = np.concatenate(
-                [
-                    results.shap_values[fold][:, feature].values
-                    for fold in range(results.num_folds)
-                ],
-                dtype=np.float64,
-            )
-            feature_values = np.concatenate(
-                [
-                    results.shap_values[fold][:, feature].data
-                    for fold in range(results.num_folds)
-                ],
-                dtype=np.float64,
-            )
-        else:
-            shap_struct = results.shap_values[fold][:, feature]
-            assert shap_struct is not None, (
-                f"Feature '{feature}' not found in SHAP values for fold {fold}"
-            )
-
-            indices = results.get_indices(fold, "all")
-
-            shap_values = cast(np.ndarray, shap_struct.values).astype(np.float64)
-            feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
+        shap_struct = results.shap_values[fold][:, feature]
+        assert shap_struct is not None, (
+            f"Feature '{feature}' not found in SHAP values for fold {fold}"
+        )
+        indices = results.get_indices(fold, "all")
+        shap_values = cast(np.ndarray, shap_struct.values).astype(np.float64)
+        feature_values = cast(np.ndarray, shap_struct.data).astype(np.float64)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -295,7 +258,7 @@ def plot_dependence(
     ax.xaxis.grid(True, linestyle="--", alpha=0.5)
 
     ax.set_title(results.species.capitalize())
-    ax.set_xlabel(feature)
+    ax.set_xlabel(_feature_label(feature))
     ax.set_ylabel(y_label)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -306,6 +269,258 @@ def plot_dependence(
         fig.tight_layout()
 
     return ax
+
+
+def _compute_cp_matrix(
+    rows: pl.DataFrame,
+    feature: str,
+    grid: np.ndarray,
+    estimators: Sequence[EstimatorProtocol],
+) -> np.ndarray:
+    """Return shape (n_grid, n_rows) predictions averaged across estimators.
+
+    For each grid value the feature column is overwritten while all other
+    columns stay fixed (ceteris paribus), then predictions are averaged over
+    the estimator ensemble.
+    """
+    n_grid = len(grid)
+    out = np.empty((n_grid, len(rows)))
+    for gi, v in enumerate(grid):
+        X_mod = rows.with_columns(pl.lit(float(v)).alias(feature))
+        preds_all = np.stack(
+            [np.asarray(est.predict(X_mod), dtype=np.float64) for est in estimators]
+        )
+        out[gi] = preds_all.mean(axis=0)
+    return out
+
+
+def plot_partial_dependence_orig_space(
+    results: ExperimentResults,
+    features: list[str],
+    fold: int = 0,
+    n_grid: int = 50,
+    n_samples: int = 500,
+    axes: np.ndarray | None = None,
+    freq_bins: int = 20,
+) -> tuple[Figure, np.ndarray]:
+    """Partial dependence plots in original growth-rate units (% yr⁻¹).
+
+    Parameters
+    ----------
+    results
+        Fitted ExperimentResults with dist_params set.
+    features
+        Feature names to plot, one panel each.
+    fold
+        Fold index; training split of this fold is used as background.
+    n_grid
+        Grid resolution (5th–95th percentile of training values).
+    n_samples
+        Number of background samples drawn from the training split.
+    axes
+        Pre-created array of Axes; created automatically if None.
+    freq_bins
+        Bins for the secondary frequency histogram.
+
+    Returns
+    -------
+    fig, axes
+    """
+    if results.dist_params is None:
+        raise ValueError("dist_params is None; cannot compute PD in original space.")
+
+    dist_params = results.dist_params
+
+    n_panels = len(features)
+    ncols = min(n_panels, 2)
+    nrows = (n_panels + 1) // 2
+
+    if axes is None:
+        fig, axes_arr = plt.subplots(
+            nrows, ncols, figsize=(6 * ncols, 5 * nrows), squeeze=False
+        )
+    else:
+        axes_arr = axes.reshape(nrows, ncols)
+        fig_obj = axes_arr.flat[0].get_figure()
+        assert fig_obj is not None
+        fig = fig_obj
+
+    X_train, _, _ = results.get_data(fold, "train")
+    rng = np.random.default_rng(0)
+    bg_idx = rng.choice(len(X_train), size=min(n_samples, len(X_train)), replace=False)
+    bg = X_train[bg_idx]
+
+    os.makedirs("./figures", exist_ok=True)
+
+    for panel_idx, feature in enumerate(features):
+        ax = axes_arr.flat[panel_idx]
+
+        feat_vals = X_train[feature].drop_nulls().to_numpy()
+        grid = np.linspace(
+            np.percentile(feat_vals, 5), np.percentile(feat_vals, 95), n_grid
+        )
+
+        preds_grid = _compute_cp_matrix(bg, feature, grid, results.estimators)
+
+        flat = pl.Series(preds_grid.ravel())
+        y_orig_flat = results.get_inverse_transform(flat, dist_params).to_numpy() * 100
+        y_orig = y_orig_flat.reshape(n_grid, len(bg))
+
+        pd_mean = y_orig.mean(axis=1)
+
+        center = pd_mean[n_grid // 2]
+        pd_mean = pd_mean - center
+        y_orig_centered = y_orig - y_orig[n_grid // 2, :]
+
+        xlim = (float(grid[0]), float(grid[-1]))
+        pad = 0.05 * (xlim[1] - xlim[0])
+        xlim_padded = (xlim[0] - pad, xlim[1] + pad)
+
+        # Compute binned SHAP mean/std before plotting so we can derive PD y-limits
+        shap_exp = results.get_shap_values(fold, "all")
+        shap_mean = np.full(n_grid, np.nan)
+        shap_std = np.full(n_grid, np.nan)
+        if feature in results.features:
+            feat_idx = results.features.index(feature)
+            shap_vals = shap_exp.values[:, feat_idx]
+            shap_feat = shap_exp.data[:, feat_idx]
+            bin_edges = np.concatenate(
+                [[grid[0]], (grid[1:] + grid[:-1]) / 2, [grid[-1]]]
+            )
+            for gi in range(n_grid):
+                mask = (shap_feat >= bin_edges[gi]) & (shap_feat < bin_edges[gi + 1])
+                if mask.sum() > 1:
+                    shap_mean[gi] = shap_vals[mask].mean()
+                    shap_std[gi] = shap_vals[mask].std()
+
+        # Find PD y-axis limits that minimise apparent MAD vs SHAP mean in display space.
+        # Display coord of pd:   (pd - y_lo) / (y_hi - y_lo)
+        # Display coord of shap: (shap - shap_lo) / shap_range
+        # We fit shap_norm = a * pd_mean + b via Theil-Sen (L1-ish), then
+        # invert to get y_lo = -b/a and y_hi = (1-b)/a.
+        valid = ~np.isnan(shap_mean)
+        y_lo_pd: float | None = None
+        y_hi_pd: float | None = None
+        n_clip_hi = n_clip_lo = 0
+        ext_hi = ext_lo = 0.0
+        if valid.sum() > 2:
+            from scipy.stats import theilslopes
+
+            shap_lo_ax = float(np.nanmin(shap_mean - shap_std))
+            shap_hi_ax = float(np.nanmax(shap_mean + shap_std))
+            shap_range = shap_hi_ax - shap_lo_ax or 1.0
+            s_norm = (shap_mean[valid] - shap_lo_ax) / shap_range
+            fit = theilslopes(s_norm, pd_mean[valid])
+            a, b = float(fit.slope), float(fit.intercept)
+            if abs(a) > 1e-10:
+                y_lo_pd = -b / a
+                y_hi_pd = (1.0 - b) / a
+                if y_lo_pd > y_hi_pd:
+                    y_lo_pd, y_hi_pd = y_hi_pd, y_lo_pd
+
+                traj_max = y_orig_centered.max(axis=0)
+                traj_min = y_orig_centered.min(axis=0)
+                n_clip_hi = int((traj_max > y_hi_pd).sum())
+                n_clip_lo = int((traj_min < y_lo_pd).sum())
+                ext_hi = float(traj_max.max() - y_hi_pd) if n_clip_hi > 0 else 0.0
+                ext_lo = float(y_lo_pd - traj_min.min()) if n_clip_lo > 0 else 0.0
+
+        for i in range(y_orig_centered.shape[1]):
+            ax.plot(
+                grid, y_orig_centered[:, i], color="#1f77b4", linewidth=0.5, alpha=0.05
+            )
+        ax.plot(grid, pd_mean, color="#1f77b4", linewidth=2)
+        ax.axhline(0, color="grey", linestyle="--")
+
+        if y_lo_pd is not None and y_hi_pd is not None:
+            ax.set_ylim(y_lo_pd, y_hi_pd)
+
+        ax.xaxis.grid(True, linestyle="--", alpha=0.5)
+        ax.set_xlabel(_feature_label(feature))
+        ax.set_ylabel("Partial dependence (% yr⁻¹)", color="#1f77b4")
+        ax.tick_params(axis="y", labelcolor="#1f77b4")
+        ax.set_title(results.species.capitalize())
+        ax.set_xlim(xlim_padded)
+
+        if n_clip_hi > 0:
+            ax.annotate(
+                f"{n_clip_hi} clipped\n+{ext_hi:.2f}% yr⁻¹ max",
+                xy=(0.5, 0.99),
+                xytext=(0.5, 0.84),
+                xycoords="axes fraction",
+                textcoords="axes fraction",
+                fontsize=7,
+                ha="center",
+                va="top",
+                color="#1f77b4",
+                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+            )
+        if n_clip_lo > 0:
+            ax.annotate(
+                f"{n_clip_lo} clipped\n−{ext_lo:.2f}% yr⁻¹ max",
+                xy=(0.5, 0.01),
+                xytext=(0.5, 0.16),
+                xycoords="axes fraction",
+                textcoords="axes fraction",
+                fontsize=7,
+                ha="center",
+                va="bottom",
+                color="#1f77b4",
+                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+            )
+
+        # SHAP mean ± std on a second y-axis
+        shap_color = "#d62728"
+        ax_shap = ax.twinx()
+        ax_shap.plot(grid, shap_mean, color=shap_color, linewidth=1.5, linestyle="--")
+        ax_shap.fill_between(
+            grid,
+            shap_mean - shap_std,
+            shap_mean + shap_std,
+            color=shap_color,
+            alpha=0.15,
+        )
+        ax_shap.axhline(0, color=shap_color, linestyle=":", linewidth=0.8, alpha=0.5)
+        ax_shap.set_ylabel("SHAP value (quantile)", color=shap_color)
+        ax_shap.tick_params(axis="y", labelcolor=shap_color)
+
+        ax2 = ax.inset_axes(
+            bounds=(0, 0, 1.0, 0.2), zorder=0, sharex=ax, frame_on=False
+        )
+        ax2.tick_params(
+            axis="x", which="both", bottom=False, top=False, labelbottom=False
+        )
+        ax2.tick_params(
+            axis="y",
+            which="both",
+            left=False,
+            right=False,
+            labelleft=False,
+            labelright=False,
+        )
+        train_feat_vals = X_train[feature].drop_nulls().to_numpy()
+        sns.histplot(
+            x=train_feat_vals,
+            legend=False,
+            ax=ax2,
+            bins=freq_bins,
+            binrange=xlim_padded,
+            stat="density",
+            color="grey",
+            alpha=0.3,
+            edgecolor=None,
+        )
+
+        fig.savefig(
+            f"./figures/partial_dependence_orig_space_{results.species}_{feature}.pdf",
+            bbox_inches="tight",
+        )
+
+    for j in range(panel_idx + 1, nrows * ncols):
+        axes_arr.flat[j].set_visible(False)
+
+    fig.tight_layout()
+    return fig, axes_arr
 
 
 def plot_ceteris_paribus_profile(
@@ -351,12 +566,7 @@ def plot_ceteris_paribus_profile(
         num=100,
     )
 
-    X_cp = pl.concat(
-        [instance.with_columns(pl.lit(f).alias(feature)) for f in feature_range],
-        how="vertical",
-    )
-
-    y_pred = estimator.predict(X_cp)
+    y_pred = _compute_cp_matrix(instance, feature, feature_range, [estimator]).ravel()
 
     if ax is None:
         plt.figure(figsize=(6, 4))
@@ -374,7 +584,7 @@ def plot_ceteris_paribus_profile(
         alpha=1.0,
     )
 
-    ax.set_xlabel(feature)
+    ax.set_xlabel(_feature_label(feature))
     ax.set_ylabel("Predicted value")
 
     return feature_range, y_pred

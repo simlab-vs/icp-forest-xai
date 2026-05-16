@@ -41,6 +41,7 @@ def _():
     from explain import (
         compute_interaction_matrix,
         plot_ceteris_paribus_profile,
+        plot_partial_dependence_orig_space,
     )
 
     return (
@@ -56,6 +57,7 @@ def _():
         os,
         pl,
         plot_ceteris_paribus_profile,
+        plot_partial_dependence_orig_space,
         plt,
         shap,
         sns,
@@ -216,7 +218,7 @@ def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
             mo.ui.table(build_rmse_table(_df_sel), page_size=20),
         ]
     )
-    return (build_rmse_table,)
+    return
 
 
 @app.cell
@@ -811,6 +813,53 @@ def _(
     plt.title(f"Interaction graph — {_sp.capitalize()} (cutoff={_cutoff:.4f})")
     plt.tight_layout()
     plt.gca()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Partial Dependence (Original Space)
+
+    Partial dependence of BAI growth rate (% yr⁻¹) on each feature.
+    The inverse PIT is applied to model outputs directly; values are not SHAP
+    attributions. The shaded band shows ±1 SD across background samples.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(ALL_SPECIES, FEATURES_METADATA, mo):
+    pd_feature_ui = mo.ui.multiselect(
+        list(FEATURES_METADATA.keys()),
+        value=["defoliation_mean", "yearly_precip", "soph_avg_temp"],
+        label="Features",
+    )
+    pd_species_ui = mo.ui.dropdown(ALL_SPECIES, value="spruce", label="Species")
+    pd_fold_ui = mo.ui.number(start=0, stop=4, step=1, value=0, label="Fold")
+    mo.hstack([pd_feature_ui, pd_species_ui, pd_fold_ui], gap=2)
+    return pd_feature_ui, pd_fold_ui, pd_species_ui
+
+
+@app.cell
+def _(
+    all_results,
+    pd_feature_ui,
+    pd_fold_ui,
+    pd_species_ui,
+    plot_partial_dependence_orig_space,
+    plt,
+):
+    _sp = pd_species_ui.value
+    _features = pd_feature_ui.value
+    _fold = int(pd_fold_ui.value)
+    if _features:
+        fig, ax = plot_partial_dependence_orig_space(
+            all_results[_sp],
+            features=_features,
+            fold=_fold,
+        )
+        plt.show()
     return
 
 
