@@ -42,6 +42,7 @@ def _():
         compute_interaction_matrix,
         plot_ceteris_paribus_profile,
         plot_partial_dependence_orig_space,
+        plot_residuals_histogram,
     )
 
     return (
@@ -58,6 +59,7 @@ def _():
         pl,
         plot_ceteris_paribus_profile,
         plot_partial_dependence_orig_space,
+        plot_residuals_histogram,
         plt,
         shap,
         sns,
@@ -67,9 +69,9 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Performance Tables (RMSE)
+    ## Error-based metrics
 
-    RMSE counterparts to Tables 2–4 from the main analysis.
+    RMSE tables (counterparts to Tables 2–4) and residual diagnostics for the selected experiment.
     Use the selectors to switch between tree-level / plot-level grouping and temporal vs. standard cross-validation.
     """)
     return
@@ -123,20 +125,38 @@ def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
         "lmm": "Linear Mixed Effects",
     }
 
+    def _scale_rmse_str(s: str | None) -> str | None:
+        if s is None:
+            return None
+        parts = s.split("±")
+        mean = float(parts[0].strip()) * 100
+        if len(parts) == 2:
+            std = float(parts[1].strip()) * 100
+            return f"{mean:.1f} ± {std:.1f}"
+        return f"{mean:.1f}"
+
     def build_rmse_table(df: pl.DataFrame) -> pl.DataFrame:
-        _rmse_rows = df.filter(pl.col("split") == "test_rmse").select(
-            "model", "ablation", "spruce", "pine", "oak", "beech"
+        _rmse_rows = (
+            df.filter(pl.col("split") == "test_rmse")
+            .select("model", "ablation", "spruce", "pine", "oak", "beech")
+            .with_columns(
+                pl.col(sp).map_elements(_scale_rmse_str, return_dtype=pl.Utf8)
+                for sp in ["spruce", "pine", "oak", "beech"]
+            )
         )
         _weighted = df.filter(pl.col("split") == "test_weight_rmse").select(
             "model",
             "ablation",
             weighted_rmse=(
-                pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
-                + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
-                + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
-                + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
+                (
+                    pl.col("spruce").cast(pl.Float64, strict=False).fill_null(0.0)
+                    + pl.col("pine").cast(pl.Float64, strict=False).fill_null(0.0)
+                    + pl.col("oak").cast(pl.Float64, strict=False).fill_null(0.0)
+                    + pl.col("beech").cast(pl.Float64, strict=False).fill_null(0.0)
+                )
+                * 100
             )
-            .round(2)
+            .round(1)
             .cast(pl.Utf8),
         )
         return (
@@ -168,10 +188,17 @@ def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
                     "pine": "Pine",
                     "beech": "Beech",
                     "oak": "Oak",
-                    "weighted_rmse": "Weighted RMSE",
+                    "weighted_rmse": "Weighted RMSE [pct. rank %]",
                 }
             )
-            .select("config", "Spruce", "Pine", "Beech", "Oak", "Weighted RMSE")
+            .select(
+                "config",
+                "Spruce",
+                "Pine",
+                "Beech",
+                "Oak",
+                "Weighted RMSE [pct. rank %]",
+            )
             .rename({"config": "Configuration"})
         )
 
@@ -216,6 +243,90 @@ def _(mo, perf_df, pl, rmse_group_col_ui, rmse_temporal_cv_ui):
         [
             mo.md(_caption),
             mo.ui.table(build_rmse_table(_df_sel), page_size=20),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### Residual histograms
+
+    Distribution of out-of-sample residuals (y_true − y_pred) aggregated across all CV folds.
+    A well-calibrated model should be centred near zero with symmetric tails.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    residual_space_ui = mo.ui.switch(value=False, label="Original space")
+    residual_space_ui
+    return (residual_space_ui,)
+
+
+@app.cell
+def _(
+    ALL_SPECIES,
+    all_results,
+    plot_residuals_histogram,
+    plt,
+    residual_space_ui,
+):
+    _orig = residual_space_ui.value
+    _fig, _axes = plt.subplots(2, 2, figsize=(10, 7), squeeze=False)
+    for _i, _sp in enumerate(ALL_SPECIES):
+        if _sp not in all_results:
+            continue
+        _ax = _axes[_i // 2, _i % 2]
+        plot_residuals_histogram(all_results[_sp], ax=_ax, original_space=_orig)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(ALL_SPECIES, all_results, mo, np, pl, residual_space_ui):
+    from scipy.stats import skew as _skew, kurtosis as _kurtosis
+
+    _orig = residual_space_ui.value
+    _unit = "%" if _orig else "pct. rank %"
+
+    def _residuals(res):
+        rows = []
+        for f in range(res.num_folds):
+            _, yt, yp = res.get_data(f, "test")
+            if _orig and res.dist_params is not None:
+                yt = res.get_inverse_transform(yt, res.dist_params)
+                yp = res.get_inverse_transform(yp, res.dist_params)
+                r = yt.to_numpy() - yp.to_numpy()
+            else:
+                r = (yt.to_numpy() - yp.to_numpy()) * 100.0
+            rows.append(r)
+        return np.concatenate(rows)
+
+    _rows = []
+    for _sp in ALL_SPECIES:
+        if _sp not in all_results:
+            continue
+        _r = _residuals(all_results[_sp])
+        _rows.append(
+            {
+                "Species": _sp.capitalize(),
+                f"RMSE [{_unit}]": round(float(np.sqrt(np.mean(_r**2))), 2),
+                f"Mean [{_unit}]": round(float(np.mean(_r)), 2),
+                f"Std [{_unit}]": round(float(np.std(_r)), 2),
+                "Skewness": round(float(_skew(_r)), 3),
+                "Kurtosis (excess)": round(float(_kurtosis(_r)), 3),
+            }
+        )
+
+    _summary = pl.DataFrame(_rows)
+    mo.vstack(
+        [
+            mo.md(f"**Residual moments** — {_unit} space"),
+            mo.ui.table(_summary),
         ]
     )
     return
@@ -858,7 +969,7 @@ def _(
 ):
     _feature = pd_feature_ui2.value
     _fold = int(pd_fold_ui2.value)
-    _fig, _axes = plt.subplots(2, 2, figsize=(12, 10), squeeze=False)
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8), squeeze=False)
     for _i, _sp in enumerate(ALL_SPECIES):
         if _sp in all_results:
             plot_partial_dependence_orig_space(
@@ -869,6 +980,11 @@ def _(
             )
     _fig.tight_layout()
     plt.show()
+    return
+
+
+@app.cell
+def _():
     return
 
 
