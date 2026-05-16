@@ -819,52 +819,56 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Partial Dependence (Original Space)
+    ## Partial Dependence + SHAP overlay (Original Space)
 
-    Partial dependence of BAI growth rate (% yr⁻¹) on each feature.
-    The inverse PIT is applied to model outputs directly; values are not SHAP
-    attributions. The shaded band shows ±1 SD across background samples.
+    Each panel shows one species. The blue ICE trajectories are individual
+    ceteris-paribus profiles in original BAI growth-rate units (% yr⁻¹),
+    centered at the grid midpoint. The bold blue line is their mean (PD).
+    The red dashed curve (right axis) is the mean SHAP value in quantile
+    space, binned by feature value, with a ±1 SD band.
+
+    The PD y-axis is scaled via Theil-Sen regression to minimise the
+    apparent MAD against the SHAP mean in display space. Clipped
+    trajectories are annotated with a vertical arrow.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(ALL_SPECIES, FEATURES_METADATA, mo):
-    pd_feature_ui = mo.ui.multiselect(
+def _(FEATURES_METADATA, mo):
+    pd_feature_ui2 = mo.ui.dropdown(
         list(FEATURES_METADATA.keys()),
-        value=["defoliation_mean", "yearly_precip", "soph_avg_temp"],
-        label="Features",
+        value="defoliation_mean",
+        label="Feature",
     )
-    pd_species_ui = mo.ui.dropdown(ALL_SPECIES, value="spruce", label="Species")
-    pd_fold_ui = mo.ui.number(start=0, stop=4, step=1, value=0, label="Fold")
-    mo.hstack([pd_feature_ui, pd_species_ui, pd_fold_ui], gap=2)
-    return pd_feature_ui, pd_fold_ui, pd_species_ui
+    pd_fold_ui2 = mo.ui.number(start=0, stop=4, step=1, value=0, label="Fold")
+    mo.hstack([pd_feature_ui2, pd_fold_ui2], gap=2)
+    return pd_feature_ui2, pd_fold_ui2
 
 
 @app.cell
 def _(
+    ALL_SPECIES,
     all_results,
-    pd_feature_ui,
-    pd_fold_ui,
-    pd_species_ui,
+    np,
+    pd_feature_ui2,
+    pd_fold_ui2,
     plot_partial_dependence_orig_space,
     plt,
 ):
-    _sp = pd_species_ui.value
-    _features = pd_feature_ui.value
-    _fold = int(pd_fold_ui.value)
-    if _features:
-        fig, ax = plot_partial_dependence_orig_space(
-            all_results[_sp],
-            features=_features,
-            fold=_fold,
-        )
-        plt.show()
-    return
-
-
-@app.cell
-def _():
+    _feature = pd_feature_ui2.value
+    _fold = int(pd_fold_ui2.value)
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 10), squeeze=False)
+    for _i, _sp in enumerate(ALL_SPECIES):
+        if _sp in all_results:
+            plot_partial_dependence_orig_space(
+                all_results[_sp],
+                features=[_feature],
+                fold=_fold,
+                axes=np.array([[_axes[_i // 2, _i % 2]]]),
+            )
+    _fig.tight_layout()
+    plt.show()
     return
 
 
