@@ -376,6 +376,55 @@ def plot_partial_dependence_orig_space(
         pad = 0.05 * (xlim[1] - xlim[0])
         xlim_padded = (xlim[0] - pad, xlim[1] + pad)
 
+        # Compute binned SHAP mean/std before plotting so we can derive PD y-limits
+        shap_exp = results.get_shap_values(fold, "all")
+        shap_mean = np.full(n_grid, np.nan)
+        shap_std = np.full(n_grid, np.nan)
+        if feature in results.features:
+            feat_idx = results.features.index(feature)
+            shap_vals = shap_exp.values[:, feat_idx]
+            shap_feat = shap_exp.data[:, feat_idx]
+            bin_edges = np.concatenate(
+                [[grid[0]], (grid[1:] + grid[:-1]) / 2, [grid[-1]]]
+            )
+            for gi in range(n_grid):
+                mask = (shap_feat >= bin_edges[gi]) & (shap_feat < bin_edges[gi + 1])
+                if mask.sum() > 1:
+                    shap_mean[gi] = shap_vals[mask].mean()
+                    shap_std[gi] = shap_vals[mask].std()
+
+        # Find PD y-axis limits that minimise apparent MAD vs SHAP mean in display space.
+        # Display coord of pd:   (pd - y_lo) / (y_hi - y_lo)
+        # Display coord of shap: (shap - shap_lo) / shap_range
+        # We fit shap_norm = a * pd_mean + b via Theil-Sen (L1-ish), then
+        # invert to get y_lo = -b/a and y_hi = (1-b)/a.
+        valid = ~np.isnan(shap_mean)
+        y_lo_pd: float | None = None
+        y_hi_pd: float | None = None
+        n_clip_hi = n_clip_lo = 0
+        ext_hi = ext_lo = 0.0
+        if valid.sum() > 2:
+            from scipy.stats import theilslopes
+
+            shap_lo_ax = float(np.nanmin(shap_mean - shap_std))
+            shap_hi_ax = float(np.nanmax(shap_mean + shap_std))
+            shap_range = shap_hi_ax - shap_lo_ax or 1.0
+            s_norm = (shap_mean[valid] - shap_lo_ax) / shap_range
+            fit = theilslopes(s_norm, pd_mean[valid])
+            a, b = float(fit.slope), float(fit.intercept)
+            if abs(a) > 1e-10:
+                y_lo_pd = -b / a
+                y_hi_pd = (1.0 - b) / a
+                if y_lo_pd > y_hi_pd:
+                    y_lo_pd, y_hi_pd = y_hi_pd, y_lo_pd
+
+                traj_max = y_orig_centered.max(axis=0)
+                traj_min = y_orig_centered.min(axis=0)
+                n_clip_hi = int((traj_max > y_hi_pd).sum())
+                n_clip_lo = int((traj_min < y_lo_pd).sum())
+                ext_hi = float(traj_max.max() - y_hi_pd) if n_clip_hi > 0 else 0.0
+                ext_lo = float(y_lo_pd - traj_min.min()) if n_clip_lo > 0 else 0.0
+
         for i in range(y_orig_centered.shape[1]):
             ax.plot(
                 grid, y_orig_centered[:, i], color="#1f77b4", linewidth=0.5, alpha=0.05
@@ -383,11 +432,57 @@ def plot_partial_dependence_orig_space(
         ax.plot(grid, pd_mean, color="#1f77b4", linewidth=2)
         ax.axhline(0, color="grey", linestyle="--")
 
+        if y_lo_pd is not None and y_hi_pd is not None:
+            ax.set_ylim(y_lo_pd, y_hi_pd)
+
         ax.xaxis.grid(True, linestyle="--", alpha=0.5)
         ax.set_xlabel(_feature_label(feature))
-        ax.set_ylabel("Partial dependence (% yr⁻¹)")
+        ax.set_ylabel("Partial dependence (% yr⁻¹)", color="#1f77b4")
+        ax.tick_params(axis="y", labelcolor="#1f77b4")
         ax.set_title(results.species.capitalize())
         ax.set_xlim(xlim_padded)
+
+        if n_clip_hi > 0:
+            ax.annotate(
+                f"{n_clip_hi} clipped\n+{ext_hi:.2f}% yr⁻¹ max",
+                xy=(0.5, 0.99),
+                xytext=(0.5, 0.84),
+                xycoords="axes fraction",
+                textcoords="axes fraction",
+                fontsize=7,
+                ha="center",
+                va="top",
+                color="#1f77b4",
+                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+            )
+        if n_clip_lo > 0:
+            ax.annotate(
+                f"{n_clip_lo} clipped\n−{ext_lo:.2f}% yr⁻¹ max",
+                xy=(0.5, 0.01),
+                xytext=(0.5, 0.16),
+                xycoords="axes fraction",
+                textcoords="axes fraction",
+                fontsize=7,
+                ha="center",
+                va="bottom",
+                color="#1f77b4",
+                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+            )
+
+        # SHAP mean ± std on a second y-axis
+        shap_color = "#d62728"
+        ax_shap = ax.twinx()
+        ax_shap.plot(grid, shap_mean, color=shap_color, linewidth=1.5, linestyle="--")
+        ax_shap.fill_between(
+            grid,
+            shap_mean - shap_std,
+            shap_mean + shap_std,
+            color=shap_color,
+            alpha=0.15,
+        )
+        ax_shap.axhline(0, color=shap_color, linestyle=":", linewidth=0.8, alpha=0.5)
+        ax_shap.set_ylabel("SHAP value (quantile)", color=shap_color)
+        ax_shap.tick_params(axis="y", labelcolor=shap_color)
 
         ax2 = ax.inset_axes(
             bounds=(0, 0, 1.0, 0.2), zorder=0, sharex=ax, frame_on=False
