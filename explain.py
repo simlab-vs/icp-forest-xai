@@ -8,7 +8,7 @@ import seaborn as sns
 import os
 
 from enum import Enum
-from typing import Callable, cast, Any
+from typing import Callable, Sequence, cast, Any
 
 from models import EstimatorProtocol, ExperimentResults, Split
 from config import FEATURES_METADATA
@@ -271,6 +271,29 @@ def plot_dependence(
     return ax
 
 
+def _compute_cp_matrix(
+    rows: pl.DataFrame,
+    feature: str,
+    grid: np.ndarray,
+    estimators: Sequence[EstimatorProtocol],
+) -> np.ndarray:
+    """Return shape (n_grid, n_rows) predictions averaged across estimators.
+
+    For each grid value the feature column is overwritten while all other
+    columns stay fixed (ceteris paribus), then predictions are averaged over
+    the estimator ensemble.
+    """
+    n_grid = len(grid)
+    out = np.empty((n_grid, len(rows)))
+    for gi, v in enumerate(grid):
+        X_mod = rows.with_columns(pl.lit(float(v)).alias(feature))
+        preds_all = np.stack(
+            [np.asarray(est.predict(X_mod), dtype=np.float64) for est in estimators]
+        )
+        out[gi] = preds_all.mean(axis=0)
+    return out
+
+
 def plot_partial_dependence_orig_space(
     results: ExperimentResults,
     features: list[str],
@@ -337,34 +360,26 @@ def plot_partial_dependence_orig_space(
             np.percentile(feat_vals, 5), np.percentile(feat_vals, 95), n_grid
         )
 
-        preds_grid = np.empty((n_grid, len(bg)))
-        for gi, v in enumerate(grid):
-            X_mod = bg.with_columns(pl.lit(float(v)).alias(feature))
-            preds_all = np.stack(
-                [
-                    np.asarray(est.predict(X_mod), dtype=np.float64)
-                    for est in results.estimators
-                ]
-            )
-            preds_grid[gi] = preds_all.mean(axis=0)
+        preds_grid = _compute_cp_matrix(bg, feature, grid, results.estimators)
 
         flat = pl.Series(preds_grid.ravel())
-        y_orig_flat = results.get_inverse_transform(flat, dist_params).to_numpy()
+        y_orig_flat = results.get_inverse_transform(flat, dist_params).to_numpy() * 100
         y_orig = y_orig_flat.reshape(n_grid, len(bg))
 
         pd_mean = y_orig.mean(axis=1)
-        pd_std = y_orig.std(axis=1)
 
         center = pd_mean[n_grid // 2]
         pd_mean = pd_mean - center
+        y_orig_centered = y_orig - y_orig[n_grid // 2, :]
 
         xlim = (float(grid[0]), float(grid[-1]))
         pad = 0.05 * (xlim[1] - xlim[0])
         xlim_padded = (xlim[0] - pad, xlim[1] + pad)
 
-        ax.fill_between(
-            grid, pd_mean - pd_std, pd_mean + pd_std, alpha=0.2, color="#1f77b4"
-        )
+        for i in range(y_orig_centered.shape[1]):
+            ax.plot(
+                grid, y_orig_centered[:, i], color="#1f77b4", linewidth=0.5, alpha=0.05
+            )
         ax.plot(grid, pd_mean, color="#1f77b4", linewidth=2)
         ax.axhline(0, color="grey", linestyle="--")
 
@@ -456,12 +471,7 @@ def plot_ceteris_paribus_profile(
         num=100,
     )
 
-    X_cp = pl.concat(
-        [instance.with_columns(pl.lit(f).alias(feature)) for f in feature_range],
-        how="vertical",
-    )
-
-    y_pred = estimator.predict(X_cp)
+    y_pred = _compute_cp_matrix(instance, feature, feature_range, [estimator]).ravel()
 
     if ax is None:
         plt.figure(figsize=(6, 4))

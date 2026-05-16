@@ -848,16 +848,23 @@ def _(
     pd_fold_ui,
     pd_species_ui,
     plot_partial_dependence_orig_space,
+    plt,
 ):
     _sp = pd_species_ui.value
     _features = pd_feature_ui.value
     _fold = int(pd_fold_ui.value)
     if _features:
-        plot_partial_dependence_orig_space(
+        fig, ax = plot_partial_dependence_orig_space(
             all_results[_sp],
             features=_features,
             fold=_fold,
         )
+        plt.show()
+    return
+
+
+@app.cell
+def _():
     return
 
 
