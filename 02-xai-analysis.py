@@ -691,6 +691,7 @@ def _(
     all_results,
     dep_feature_ui,
     dep_species_ui,
+    mo,
     np,
     plot_dependence,
     plt,
@@ -699,25 +700,38 @@ def _(
     _species_sel = dep_species_ui.value
     _species_list = ALL_SPECIES if _species_sel == "all" else [_species_sel]
 
+    _available_features = list(
+        all_results[_species_list[0]].shap_values[0].feature_names
+    )
+    mo.stop(
+        _feature not in _available_features,
+        mo.callout(
+            mo.md(
+                f"Feature **{_feature}** is not available in the current ablation. "
+                f"Available features: {', '.join(_available_features)}"
+            ),
+            kind="warn",
+        ),
+    )
+
     _n = len(_species_list)
 
-    # Compute a shared x range from all selected species so every subplot has
-    # the same axis, making cross-species comparison meaningful.
-    _all_fv = np.concatenate(
-        [
-            np.concatenate(
-                [
-                    all_results[_sp]
-                    .shap_values[_f][:, _feature]
-                    .data.astype(np.float64)
-                    for _f in range(all_results[_sp].num_folds)
-                ]
-            )
-            for _sp in _species_list
-        ]
-    )
+    # Compute shared x and y ranges across all selected species so every
+    # subplot is directly comparable.
+    _all_fv, _all_sv = [], []
+    for _sp in _species_list:
+        for _f in range(all_results[_sp].num_folds):
+            _sl = all_results[_sp].shap_values[_f][:, _feature]
+            _all_fv.append(_sl.data.astype(np.float64))
+            _all_sv.append(_sl.values.astype(np.float64))
+    _all_fv = np.concatenate(_all_fv)
+    _all_sv = np.concatenate(_all_sv) * 100  # plot_dependence uses percentage
+
     _valid_fv = _all_fv[~np.isnan(_all_fv)]
-    _global_xlim = (float(_valid_fv.min()), float(_valid_fv.max()))
+    _valid_sv = _all_sv[~np.isnan(_all_sv)]
+    # _global_xlim = (float(_valid_fv.min()), float(_valid_fv.max()))
+    _global_xlim = (float(_valid_fv.min()), 60)
+    _global_ylim = (float(_valid_sv.min()), float(_valid_sv.max()))
 
     _fig, _axes = plt.subplots(
         (_n + 1) // 2,
@@ -725,16 +739,18 @@ def _(
         figsize=(12, 4 * ((_n + 1) // 2)),
         squeeze=False,
         sharex=True,
+        sharey=True,
     )
 
     for _i, (_sp, _ax) in enumerate(zip(_species_list, _axes.flatten())):
         plot_dependence(
             all_results[_sp],
             feature=_feature,
-            alpha=0.15,
+            alpha=0.25,
             ax=_ax,
             xlim=_global_xlim,
-            scatter_color="#A2BCD498",
+            ylim=_global_ylim,
+            scatter_color="#C6CDDA",
         )
 
     for _j in range(_i + 1, len(_axes.flatten())):

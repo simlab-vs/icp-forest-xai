@@ -121,7 +121,7 @@ FEATURES_METADATA = {
         "description": "Deposition total nitrogen (N)",
         "label": "Dep. total nitrogen (N)",
         "level": "plot",
-        "unit": "mg/l",
+        "unit": "kg N/ha/yr",
     },
     # "dep_n_nh4": {
     #     "description": "Deposition ammonium (NH4)",
@@ -157,7 +157,7 @@ FEATURES_METADATA = {
         "description": "Deposition sulfate (SO4)",
         "label": "Dep. sulfate (SO4)",
         "level": "plot",
-        "unit": "mg/l",
+        "unit": "kg SO4/ha/yr",
     },
     "dep_alk": {
         "description": "Deposition alkalinity",

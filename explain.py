@@ -43,7 +43,7 @@ def plot_dependence(
     ylim: tuple[float, float] | None = None,
     ax: Axes | None = None,
     color: str = "#1f77b4",
-    scatter_color: str = "#6A8095",
+    scatter_color: str = "#C3CDDA",
     plot_type: PlotType = PlotType.SCATTER,
     with_density: bool = True,
     show_mean_band: bool = True,
@@ -97,7 +97,11 @@ def plot_dependence(
     # If no alpha is provided, set it to 0.6
     kwargs.setdefault("alpha", 0.6)
 
-    y_label = "SHAP value [%]" if use_percentage else "SHAP value"
+    y_label = (
+        "SHAP value [percentile rank %]"
+        if use_percentage
+        else "SHAP value [percentile rank]"
+    )
 
     if fold is None:
         indices = np.arange(results.X.shape[0])
@@ -232,14 +236,31 @@ def plot_dependence(
                 _bmeans[_b] = _sv[_m].mean()
                 _bq025[_b] = np.percentile(_sv[_m], 2.5)
                 _bq975[_b] = np.percentile(_sv[_m], 97.5)
+        # Split into contiguous populated segments so empty bins create visible gaps.
         _ok = ~np.isnan(_bmeans)
-        if _ok.sum() >= 2:
-            _bc = _centers[_ok]
-            _bm = _bmeans[_ok]
-            _blo = _bq025[_ok]
-            _bhi = _bq975[_ok]
-            _k = min(3, int(_ok.sum()) - 1)
-            _xs = np.linspace(_bc[0], _bc[-1], 300)
+        _changes = np.diff(_ok.astype(int), prepend=0, append=0)
+        _seg_starts = np.where(_changes == 1)[0]
+        _seg_ends = np.where(_changes == -1)[0]
+        for _s, _e in zip(_seg_starts, _seg_ends):
+            _bc = _centers[_s:_e]
+            _bm = _bmeans[_s:_e]
+            _blo = _bq025[_s:_e]
+            _bhi = _bq975[_s:_e]
+            if len(_bc) == 1:
+                _xs = np.array([_edges[_s], _edges[_e]])
+                ax.fill_between(
+                    _xs,
+                    [_blo[0], _blo[0]],
+                    [_bhi[0], _bhi[0]],
+                    alpha=0.25,
+                    color=color,
+                    zorder=3,
+                    linewidth=0,
+                )
+                ax.plot(_xs, [_bm[0], _bm[0]], color=color, linewidth=2, zorder=4)
+                continue
+            _k = min(3, len(_bc) - 1)
+            _xs = np.linspace(_bc[0], _bc[-1], max(30, len(_bc) * 10))
             _mean_s = make_interp_spline(_bc, _bm, k=_k)(_xs)
             _lo_s = make_interp_spline(_bc, _blo, k=_k)(_xs)
             _hi_s = make_interp_spline(_bc, _bhi, k=_k)(_xs)
