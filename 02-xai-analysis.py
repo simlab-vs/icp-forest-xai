@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.2"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
@@ -255,7 +255,7 @@ def _(mo):
     group_col_ui = mo.ui.dropdown(
         ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
     )
-    temporal_cv_ui = mo.ui.switch(value=True, label="Temporal CV")
+    temporal_cv_ui = mo.ui.switch(value=False, label="Temporal CV")
     weight_shap_ui = mo.ui.switch(value=True, label="Weight SHAP by n")
 
     mo.hstack(
@@ -691,6 +691,7 @@ def _(
     all_results,
     dep_feature_ui,
     dep_species_ui,
+    np,
     plot_dependence,
     plt,
 ):
@@ -699,20 +700,49 @@ def _(
     _species_list = ALL_SPECIES if _species_sel == "all" else [_species_sel]
 
     _n = len(_species_list)
+
+    # Compute a shared x range from all selected species so every subplot has
+    # the same axis, making cross-species comparison meaningful.
+    _all_fv = np.concatenate(
+        [
+            np.concatenate(
+                [
+                    all_results[_sp]
+                    .shap_values[_f][:, _feature]
+                    .data.astype(np.float64)
+                    for _f in range(all_results[_sp].num_folds)
+                ]
+            )
+            for _sp in _species_list
+        ]
+    )
+    _valid_fv = _all_fv[~np.isnan(_all_fv)]
+    _global_xlim = (float(_valid_fv.min()), float(_valid_fv.max()))
+
     _fig, _axes = plt.subplots(
-        (_n + 1) // 2, min(_n, 2), figsize=(12, 4 * ((_n + 1) // 2)), squeeze=False
+        (_n + 1) // 2,
+        min(_n, 2),
+        figsize=(12, 4 * ((_n + 1) // 2)),
+        squeeze=False,
+        sharex=True,
     )
 
     for _i, (_sp, _ax) in enumerate(zip(_species_list, _axes.flatten())):
         plot_dependence(
             all_results[_sp],
             feature=_feature,
-            alpha=0.3,
+            alpha=0.15,
             ax=_ax,
+            xlim=_global_xlim,
+            scatter_color="#A2BCD498",
         )
 
     for _j in range(_i + 1, len(_axes.flatten())):
         _axes.flatten()[_j].set_visible(False)
+
+    # sharex=True suppresses tick labels on non-bottom rows; restore them.
+    for _ax in _axes.flatten()[: _i + 1]:
+        _ax.tick_params(axis="x", labelbottom=True)
 
     plt.tight_layout()
     plt.gca()

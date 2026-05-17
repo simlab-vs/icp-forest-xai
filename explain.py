@@ -43,8 +43,10 @@ def plot_dependence(
     ylim: tuple[float, float] | None = None,
     ax: Axes | None = None,
     color: str = "#1f77b4",
+    scatter_color: str = "#6A8095",
     plot_type: PlotType = PlotType.SCATTER,
     with_density: bool = True,
+    show_mean_band: bool = True,
     **kwargs: Any,
 ) -> Axes:
     """Plot SHAP dependence plot for a given feature.
@@ -76,11 +78,15 @@ def plot_dependence(
     ax
         Axes object to plot the SHAP values on. If None, a new figure is created.
     color
-        Color of the scatter points.
+        Color of the mean line and ± std band.
+    scatter_color
+        Color of the background scatter points.
     plot_type
         Type of plot to create (scatter or line).
     with_density
         Whether to overlay a density histogram at the bottom of the plot.
+    show_mean_band
+        Whether to overlay an interpolated mean ± std curve on the scatter plot.
     **kwargs
         Additional keyword arguments to pass to the scatter plot.
 
@@ -171,11 +177,12 @@ def plot_dependence(
             wiggle * ywidth,
             size=np.sum(valid_indices),
         )
+        kwargs.setdefault("zorder", 1)
         sns.scatterplot(
             x=feature_values[valid_indices] + xwiggle,
             y=shap_values[valid_indices] + ywiggle,
             ax=ax,
-            color=color,
+            color=scatter_color,
             edgecolor=None,
             legend=False,
             size=6,
@@ -206,6 +213,46 @@ def plot_dependence(
 
             if label is not None:
                 ax.legend([label])
+
+    if plot_type == PlotType.SCATTER and show_mean_band:
+        from scipy.interpolate import make_interp_spline
+
+        _fv = feature_values[valid_indices]
+        _sv = shap_values[valid_indices]
+        _n_bins = 30
+        _edges = np.linspace(xlim[0], xlim[1], _n_bins + 1)
+        _centers = 0.5 * (_edges[:-1] + _edges[1:])
+        _ids = np.searchsorted(_edges[1:-1], _fv, side="right")
+        _bmeans = np.full(_n_bins, np.nan)
+        _bq025 = np.full(_n_bins, np.nan)
+        _bq975 = np.full(_n_bins, np.nan)
+        for _b in range(_n_bins):
+            _m = _ids == _b
+            if _m.sum() >= 2:
+                _bmeans[_b] = _sv[_m].mean()
+                _bq025[_b] = np.percentile(_sv[_m], 2.5)
+                _bq975[_b] = np.percentile(_sv[_m], 97.5)
+        _ok = ~np.isnan(_bmeans)
+        if _ok.sum() >= 2:
+            _bc = _centers[_ok]
+            _bm = _bmeans[_ok]
+            _blo = _bq025[_ok]
+            _bhi = _bq975[_ok]
+            _k = min(3, int(_ok.sum()) - 1)
+            _xs = np.linspace(_bc[0], _bc[-1], 300)
+            _mean_s = make_interp_spline(_bc, _bm, k=_k)(_xs)
+            _lo_s = make_interp_spline(_bc, _blo, k=_k)(_xs)
+            _hi_s = make_interp_spline(_bc, _bhi, k=_k)(_xs)
+            ax.fill_between(
+                _xs,
+                _lo_s,
+                _hi_s,
+                alpha=0.25,
+                color=color,
+                zorder=3,
+                linewidth=0,
+            )
+            ax.plot(_xs, _mean_s, color=color, linewidth=2, zorder=4)
 
     if plot_type == PlotType.DENSITY or with_density:
         # Overlaid inset axes for histogram with the same x-axis limits
