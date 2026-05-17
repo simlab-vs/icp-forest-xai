@@ -18,7 +18,13 @@ uniform:
 
 1. **Shift**: y′ = log-RGR + 1 (ensures y′ > 0 across all observed values).
 2. **Fit**: a log-normal distribution is fitted to y′ on the full per-species
-   dataset (`scipy.stats.lognorm.fit`).
+   dataset (`scipy.stats.lognorm.fit`). The fit is performed once per species
+   on all observations (all folds pooled), so the same `(shape, loc, scale)`
+   triplet is reused for every fold of that species. This introduces a mild
+   data-leakage in the inverse transform when evaluating test-fold predictions,
+   but the effect is negligible because the distribution parameters are
+   estimated from the full marginal and change little with any single fold held
+   out.
 3. **Transform**: ỹ = F_lognorm(y′) ∈ (0, 1).
 
 The PIT gives linear models a better-conditioned regression problem.

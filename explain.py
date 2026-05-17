@@ -10,6 +10,8 @@ import os
 from enum import Enum
 from typing import Callable, Sequence, cast, Any
 
+from scipy import stats as _scipy_stats
+
 from models import EstimatorProtocol, ExperimentResults, Split
 from config import FEATURES_METADATA
 
@@ -303,7 +305,7 @@ def plot_partial_dependence_orig_space(
     axes: np.ndarray | None = None,
     freq_bins: int = 20,
 ) -> tuple[Figure, np.ndarray]:
-    """Partial dependence plots in original growth-rate units (% yr⁻¹).
+    """Partial dependence plots in original growth-rate units (%/yr).
 
     Parameters
     ----------
@@ -314,7 +316,7 @@ def plot_partial_dependence_orig_space(
     fold
         Fold index; training split of this fold is used as background.
     n_grid
-        Grid resolution (5th–95th percentile of training values).
+        Grid resolution (5th-95th percentile of training values).
     n_samples
         Number of background samples drawn from the training split.
     axes
@@ -437,14 +439,14 @@ def plot_partial_dependence_orig_space(
 
         ax.xaxis.grid(True, linestyle="--", alpha=0.5)
         ax.set_xlabel(_feature_label(feature))
-        ax.set_ylabel("Partial dependence (% yr⁻¹)", color="#1f77b4")
+        ax.set_ylabel("Partial dependence [%/yr]", color="#1f77b4")
         ax.tick_params(axis="y", labelcolor="#1f77b4")
         ax.set_title(results.species.capitalize())
         ax.set_xlim(xlim_padded)
 
         if n_clip_hi > 0:
             ax.annotate(
-                f"{n_clip_hi} clipped\n+{ext_hi:.2f}% yr⁻¹ max",
+                f"{n_clip_hi} clipped\n+{ext_hi:.2f}%/yr max",
                 xy=(0.5, 0.99),
                 xytext=(0.5, 0.84),
                 xycoords="axes fraction",
@@ -457,7 +459,7 @@ def plot_partial_dependence_orig_space(
             )
         if n_clip_lo > 0:
             ax.annotate(
-                f"{n_clip_lo} clipped\n−{ext_lo:.2f}% yr⁻¹ max",
+                f"{n_clip_lo} clipped\n−{ext_lo:.2f}%/yr max",
                 xy=(0.5, 0.01),
                 xytext=(0.5, 0.16),
                 xycoords="axes fraction",
@@ -472,16 +474,18 @@ def plot_partial_dependence_orig_space(
         # SHAP mean ± std on a second y-axis
         shap_color = "#d62728"
         ax_shap = ax.twinx()
-        ax_shap.plot(grid, shap_mean, color=shap_color, linewidth=1.5, linestyle="--")
+        ax_shap.plot(
+            grid, shap_mean * 100, color=shap_color, linewidth=1.5, linestyle="--"
+        )
         ax_shap.fill_between(
             grid,
-            shap_mean - shap_std,
-            shap_mean + shap_std,
+            shap_mean * 100 - shap_std * 100,
+            shap_mean * 100 + shap_std * 100,
             color=shap_color,
             alpha=0.15,
         )
         ax_shap.axhline(0, color=shap_color, linestyle=":", linewidth=0.8, alpha=0.5)
-        ax_shap.set_ylabel("SHAP value (quantile)", color=shap_color)
+        ax_shap.set_ylabel("SHAP value [percentile rank %]", color=shap_color)
         ax_shap.tick_params(axis="y", labelcolor=shap_color)
 
         ax2 = ax.inset_axes(
@@ -1182,3 +1186,97 @@ def compute_shap_curve_stability(
         pl.col("spearman_rho").cast(pl.Float64),
         pl.col("normalized_mad").cast(pl.Float64),
     )
+
+
+def plot_residuals_histogram(
+    results: ExperimentResults,
+    fold: int | None = None,
+    split: Split = "test",
+    original_space: bool = False,
+    bins: int | str = "auto",
+    ax: Axes | None = None,
+    color: str = "#1f77b4",
+) -> Axes:
+    """Plot a histogram of out-of-sample prediction residuals (y_true − y_pred).
+
+    Parameters
+    ----------
+    results
+        Results object containing predictions and true values.
+    fold
+        Fold index to use. If None, residuals from all folds are concatenated.
+    split
+        Data split to use ('train', 'test', or 'all'). Defaults to 'test'.
+    original_space
+        If True and dist_params is available, residuals are computed in the
+        original growth-rate space (%). Otherwise quantile space is used.
+    bins
+        Number of bins or binning strategy passed to ax.hist.
+    ax
+        Axes to plot on. If None, a new figure is created.
+    color
+        Histogram and KDE line color.
+
+    Returns
+    -------
+    The axes object with the residual histogram.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 4))
+
+    folds = [fold] if fold is not None else list(range(results.num_folds))
+
+    y_true_parts: list[np.ndarray] = []
+    y_pred_parts: list[np.ndarray] = []
+    for f in folds:
+        _, y_true_s, y_pred_s = results.get_data(f, split)
+        if original_space and results.dist_params is not None:
+            y_true_np = results.get_inverse_transform(
+                y_true_s, results.dist_params
+            ).to_numpy()
+            y_pred_np = results.get_inverse_transform(
+                y_pred_s, results.dist_params
+            ).to_numpy()
+        else:
+            y_true_np = y_true_s.to_numpy()
+            y_pred_np = y_pred_s.to_numpy()
+        y_true_parts.append(y_true_np)
+        y_pred_parts.append(y_pred_np)
+
+    y_true_all = np.concatenate(y_true_parts)
+    y_pred_all = np.concatenate(y_pred_parts)
+    residuals = y_true_all - y_pred_all
+
+    in_orig = original_space and results.dist_params is not None
+    if not in_orig:
+        residuals = residuals * 100.0
+
+    rmse = float(np.sqrt(np.mean(residuals**2)))
+    mean = float(np.mean(residuals))
+    skew = float(_scipy_stats.skew(residuals))
+
+    ax.hist(residuals, bins=bins, color=color, alpha=0.5, density=True)
+    sns.kdeplot(residuals, ax=ax, color=color, linewidth=1.5)
+    ax.axvline(0, color="grey", linestyle="--", linewidth=1)
+
+    stats_text = f"RMSE  = {rmse:.2f}%\nMean  = {mean:.2f}%\nSkew  = {skew:.2f}"
+    ax.text(
+        0.97,
+        0.97,
+        stats_text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        family="monospace",
+    )
+
+    ax.set_title(results.species.capitalize())
+
+    ax.set_xlabel("Residual [%/yr]" if in_orig else "Residual [pct. rank %]")
+    ax.xaxis.grid(True, linestyle="--", alpha=0.5)
+    # Use scientific notation for y-axis
+    ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+    ax.set_ylabel("Density")
+
+    return ax
