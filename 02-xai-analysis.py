@@ -731,7 +731,7 @@ def _(
     _valid_sv = _all_sv[~np.isnan(_all_sv)]
     # _global_xlim = (float(_valid_fv.min()), float(_valid_fv.max()))
     _global_xlim = (float(_valid_fv.min()), 60)
-    _global_ylim = (float(_valid_sv.min()), float(_valid_sv.max()))
+    _global_ylim = (float(_valid_sv.min()), 8)
 
     _fig, _axes = plt.subplots(
         (_n + 1) // 2,
