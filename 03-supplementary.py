@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.2"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
@@ -975,9 +975,9 @@ def _(
             plot_partial_dependence_orig_space(
                 all_results[_sp],
                 features=[_feature],
-                fold=_fold,
                 axes=np.array([[_axes[_i // 2, _i % 2]]]),
             )
+
     _fig.tight_layout()
     plt.show()
     return

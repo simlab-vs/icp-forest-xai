@@ -454,40 +454,65 @@ def plot_partial_dependence_orig_space(
         pad = 0.05 * (xlim[1] - xlim[0])
         xlim_padded = (xlim[0] - pad, xlim[1] + pad)
 
-        # Compute binned SHAP mean/std before plotting so we can derive PD y-limits
+        # Compute binned SHAP statistics before plotting so we can derive PD y-limits.
+        # Uses the same binning strategy as plot_dependence: searchsorted into equally-spaced
+        # bins over the padded x range, then 2.5/97.5 percentile bands.
         shap_exp = results.get_shap_values(fold, "all")
-        shap_mean = np.full(n_grid, np.nan)
-        shap_std = np.full(n_grid, np.nan)
+        # Bin edges are midpoints between consecutive grid points so shap_centers == grid
+        # exactly, guaranteeing x-alignment between SHAP and PD segments.
+        shap_centers = grid.copy()
+        shap_edges = np.concatenate(
+            [[xlim_padded[0]], (grid[:-1] + grid[1:]) / 2, [xlim_padded[1]]]
+        )
+        bmeans = np.full(n_grid, np.nan)
+        bq025 = np.full(n_grid, np.nan)
+        bq975 = np.full(n_grid, np.nan)
         if feature in results.features:
             feat_idx = results.features.index(feature)
-            shap_vals = shap_exp.values[:, feat_idx]
-            shap_feat = shap_exp.data[:, feat_idx]
-            bin_edges = np.concatenate(
-                [[grid[0]], (grid[1:] + grid[:-1]) / 2, [grid[-1]]]
-            )
-            for gi in range(n_grid):
-                mask = (shap_feat >= bin_edges[gi]) & (shap_feat < bin_edges[gi + 1])
-                if mask.sum() > 1:
-                    shap_mean[gi] = shap_vals[mask].mean()
-                    shap_std[gi] = shap_vals[mask].std()
+            shap_vals_all = shap_exp.values[:, feat_idx]
+            shap_feat_all = shap_exp.data[:, feat_idx]
+            valid_shap = ~np.isnan(shap_feat_all)
+            shap_vals = shap_vals_all[valid_shap]
+            shap_feat = shap_feat_all[valid_shap]
+            ids = np.searchsorted(shap_edges[1:-1], shap_feat, side="right")
+            for b in range(n_grid):
+                m = ids == b
+                if m.sum() >= 2:
+                    bmeans[b] = shap_vals[m].mean()
+                    bq025[b] = np.percentile(shap_vals[m], 2.5)
+                    bq975[b] = np.percentile(shap_vals[m], 97.5)
 
         # Find PD y-axis limits that minimise apparent MAD vs SHAP mean in display space.
         # Display coord of pd:   (pd - y_lo) / (y_hi - y_lo)
         # Display coord of shap: (shap - shap_lo) / shap_range
         # We fit shap_norm = a * pd_mean + b via Theil-Sen (L1-ish), then
         # invert to get y_lo = -b/a and y_hi = (1-b)/a.
-        valid = ~np.isnan(shap_mean)
+        valid = ~np.isnan(bmeans)
         y_lo_pd: float | None = None
         y_hi_pd: float | None = None
         n_clip_hi = n_clip_lo = 0
         ext_hi = ext_lo = 0.0
+        shap_disp_lo: float | None = None
+        shap_disp_hi: float | None = None
         if valid.sum() > 2:
             from scipy.stats import theilslopes
 
-            shap_lo_ax = float(np.nanmin(shap_mean - shap_std))
-            shap_hi_ax = float(np.nanmax(shap_mean + shap_std))
-            shap_range = shap_hi_ax - shap_lo_ax or 1.0
-            s_norm = (shap_mean[valid] - shap_lo_ax) / shap_range
+            # Compute the actual SHAP y-axis display range (in ×100 plotted units).
+            # Must include 0 for the no-effect axhline, then apply 5% padding so the
+            # normalization below matches what ax.set_ylim will be set to exactly.
+            _shap_lo = float(np.nanmin(bq025[valid])) * 100
+            _shap_hi = float(np.nanmax(bq975[valid])) * 100
+            _lo = min(_shap_lo, 0.0)
+            _hi = max(_shap_hi, 0.0)
+            _pad = 0.05 * (_hi - _lo)
+            shap_disp_lo = _lo - _pad
+            shap_disp_hi = _hi + _pad
+            shap_disp_range = shap_disp_hi - shap_disp_lo or 1.0
+
+            # Normalize SHAP to [0, 1] relative to the explicit display range so that
+            # y_lo_pd / y_hi_pd are exactly the bottom / top of the displayed SHAP axis.
+            # shap_centers == grid, so no interpolation is needed.
+            s_norm = (bmeans[valid] * 100 - shap_disp_lo) / shap_disp_range
             fit = theilslopes(s_norm, pd_mean[valid])
             a, b = float(fit.slope), float(fit.intercept)
             if abs(a) > 1e-10:
@@ -503,25 +528,77 @@ def plot_partial_dependence_orig_space(
                 ext_hi = float(traj_max.max() - y_hi_pd) if n_clip_hi > 0 else 0.0
                 ext_lo = float(y_lo_pd - traj_min.min()) if n_clip_lo > 0 else 0.0
 
-        for i in range(y_orig_centered.shape[1]):
-            ax.plot(
-                grid, y_orig_centered[:, i], color="#1f77b4", linewidth=0.5, alpha=0.05
-            )
-        ax.plot(grid, pd_mean, color="#1f77b4", linewidth=2)
-        ax.axhline(0, color="grey", linestyle="--")
+        pd_color = "#d62728"
+        shap_color = "#1f77b4"
+        from scipy.ndimage import gaussian_filter1d
+
+        # Both overlays share the same gap mask (bins with >= 2 SHAP observations).
+        changes = np.diff(valid.astype(int), prepend=0, append=0)
+        seg_starts = np.where(changes == 1)[0]
+        seg_ends = np.where(changes == -1)[0]
+
+        # SHAP mean ± 2.5/97.5 percentile band on the primary (left) y-axis.
+        shap_bin_hw = (
+            grid[1] - grid[0]
+        ) / 2  # interior half-step, not the padded outer edge
+        for s, e in zip(seg_starts, seg_ends):
+            bc = shap_centers[s:e]
+            bm = bmeans[s:e]
+            blo = bq025[s:e]
+            bhi = bq975[s:e]
+            if len(bc) == 1:
+                xs = np.array([bc[0] - shap_bin_hw, bc[0] + shap_bin_hw])
+                ax.plot(
+                    xs,
+                    [bm[0] * 100, bm[0] * 100],
+                    color=shap_color,
+                    linewidth=1.5,
+                    linestyle="--",
+                )
+                ax.fill_between(
+                    xs,
+                    [blo[0] * 100, blo[0] * 100],
+                    [bhi[0] * 100, bhi[0] * 100],
+                    color=shap_color,
+                    alpha=0.15,
+                    linewidth=0,
+                )
+                continue
+            sigma = max(1.0, len(bc) / 15)
+            xs = np.linspace(bc[0], bc[-1], max(30, len(bc) * 10))
+            mean_s = np.interp(xs, bc, gaussian_filter1d(bm, sigma=sigma)) * 100
+            lo_s = np.interp(xs, bc, gaussian_filter1d(blo, sigma=sigma)) * 100
+            hi_s = np.interp(xs, bc, gaussian_filter1d(bhi, sigma=sigma)) * 100
+            ax.plot(xs, mean_s, color=shap_color, linewidth=1.5, linestyle="--")
+            ax.fill_between(xs, lo_s, hi_s, color=shap_color, alpha=0.15, linewidth=0)
+        ax.axhline(0, color=shap_color, linestyle=":", linewidth=0.8, alpha=0.5)
+        ax.set_ylabel("SHAP value [percentile rank %]", color=shap_color)
+        ax.tick_params(axis="y", labelcolor=shap_color)
+        if shap_disp_lo is not None and shap_disp_hi is not None:
+            ax.set_ylim(shap_disp_lo, shap_disp_hi)
+
+        # PD trajectories + mean on the secondary (right) y-axis, same gap segments.
+        ax_pd = ax.twinx()
+        for s, e in zip(seg_starts, seg_ends):
+            for i in range(y_orig_centered.shape[1]):
+                ax_pd.plot(
+                    grid[s:e],
+                    y_orig_centered[s:e, i],
+                    color=pd_color,
+                    linewidth=0.5,
+                    alpha=0.05,
+                )
+            ax_pd.plot(grid[s:e], pd_mean[s:e], color=pd_color, linewidth=2)
+        ax_pd.axhline(0, color="grey", linestyle="--")
 
         if y_lo_pd is not None and y_hi_pd is not None:
-            ax.set_ylim(y_lo_pd, y_hi_pd)
+            ax_pd.set_ylim(y_lo_pd, y_hi_pd)
 
-        ax.xaxis.grid(True, linestyle="--", alpha=0.5)
-        ax.set_xlabel(_feature_label(feature))
-        ax.set_ylabel("Partial dependence [%/yr]", color="#1f77b4")
-        ax.tick_params(axis="y", labelcolor="#1f77b4")
-        ax.set_title(results.species.capitalize())
-        ax.set_xlim(xlim_padded)
+        ax_pd.set_ylabel("Partial dependence [%/yr]", color=pd_color)
+        ax_pd.tick_params(axis="y", labelcolor=pd_color)
 
         if n_clip_hi > 0:
-            ax.annotate(
+            ax_pd.annotate(
                 f"{n_clip_hi} clipped\n+{ext_hi:.2f}%/yr max",
                 xy=(0.5, 0.99),
                 xytext=(0.5, 0.84),
@@ -530,11 +607,11 @@ def plot_partial_dependence_orig_space(
                 fontsize=7,
                 ha="center",
                 va="top",
-                color="#1f77b4",
-                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+                color=pd_color,
+                arrowprops=dict(arrowstyle="->", color=pd_color),
             )
         if n_clip_lo > 0:
-            ax.annotate(
+            ax_pd.annotate(
                 f"{n_clip_lo} clipped\n−{ext_lo:.2f}%/yr max",
                 xy=(0.5, 0.01),
                 xytext=(0.5, 0.16),
@@ -543,26 +620,14 @@ def plot_partial_dependence_orig_space(
                 fontsize=7,
                 ha="center",
                 va="bottom",
-                color="#1f77b4",
-                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+                color=pd_color,
+                arrowprops=dict(arrowstyle="->", color=pd_color),
             )
 
-        # SHAP mean ± std on a second y-axis
-        shap_color = "#d62728"
-        ax_shap = ax.twinx()
-        ax_shap.plot(
-            grid, shap_mean * 100, color=shap_color, linewidth=1.5, linestyle="--"
-        )
-        ax_shap.fill_between(
-            grid,
-            shap_mean * 100 - shap_std * 100,
-            shap_mean * 100 + shap_std * 100,
-            color=shap_color,
-            alpha=0.15,
-        )
-        ax_shap.axhline(0, color=shap_color, linestyle=":", linewidth=0.8, alpha=0.5)
-        ax_shap.set_ylabel("SHAP value [percentile rank %]", color=shap_color)
-        ax_shap.tick_params(axis="y", labelcolor=shap_color)
+        ax.xaxis.grid(True, linestyle="--", alpha=0.5)
+        ax.set_xlabel(_feature_label(feature))
+        ax.set_title(results.species.capitalize())
+        ax.set_xlim(xlim_padded)
 
         ax2 = ax.inset_axes(
             bounds=(0, 0, 1.0, 0.2), zorder=0, sharex=ax, frame_on=False
