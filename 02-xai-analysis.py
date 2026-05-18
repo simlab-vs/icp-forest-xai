@@ -729,9 +729,8 @@ def _(
 
     _valid_fv = _all_fv[~np.isnan(_all_fv)]
     _valid_sv = _all_sv[~np.isnan(_all_sv)]
-    # _global_xlim = (float(_valid_fv.min()), float(_valid_fv.max()))
-    _global_xlim = (float(_valid_fv.min()), 60)
-    _global_ylim = (float(_valid_sv.min()), 8)
+    _global_xlim = (float(_valid_fv.min()), 60)  # float(_valid_fv.max()))
+    _global_ylim = (float(_valid_sv.min()), float(_valid_sv.max()))
 
     _fig, _axes = plt.subplots(
         (_n + 1) // 2,
@@ -760,6 +759,64 @@ def _(
     for _ax in _axes.flatten()[: _i + 1]:
         _ax.tick_params(axis="x", labelbottom=True)
 
+    plt.tight_layout()
+    plt.gca()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Defoliation analysis
+    """)
+    return
+
+
+@app.cell
+def _(ALL_SPECIES, PlotType, all_results, plot_dependence, plt):
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    for sp, ax in zip(ALL_SPECIES, axes.flatten()):
+        plot_dependence(
+            all_results[sp],
+            feature="defoliation_mean",
+            ax=ax,
+            xlim=(0, 100),
+            plot_type=PlotType.MEAN_BAND,
+            linewidth=2.0,
+            show_no_effect=False,
+            n_bins=50,
+            ylim=(-15, 10),
+            density_color="#1f77b4",
+        )
+        plot_dependence(
+            all_results[sp],
+            feature="defoliation_max",
+            ax=ax,
+            xlim=(0, 100),
+            color="#ff7f0e",
+            plot_type=PlotType.MEAN_BAND,
+            linewidth=2.0,
+            ylim=(-15, 10),
+            n_bins=50,
+            with_density=True,
+            density_color="#ff7f0e",
+            connect_gaps=True,
+        )
+        ax.set_title(sp.capitalize())
+        ax.set_xlabel("Defoliation (mean/max) [%]")
+        ax.set_ylabel("SHAP value [percentile rank %]")
+
+    fig.legend(
+        title="Feature",
+        labels=[
+            "Mean defoliation (μ)",
+            "Mean defoliation (95p)",
+            "Max defoliation (μ)",
+            "Max defoliation (95p)",
+        ],
+        loc="outside upper right",
+    )
     plt.tight_layout()
     plt.gca()
     return
@@ -808,60 +865,6 @@ def _(
         all_results[_sp], top_n=_top_n_features, ax=_ax, vmax=0.006
     )
     plt.title(f"Feature interactions — {_sp.capitalize()}")
-    plt.tight_layout()
-    plt.gca()
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ## Defoliation analysis
-    """)
-    return
-
-
-@app.cell
-def _(ALL_SPECIES, PlotType, all_results, plot_dependence, plt):
-    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8))
-
-    for _sp, _ax in zip(ALL_SPECIES, _axes.flatten()):
-        plot_dependence(
-            all_results[_sp],
-            feature="defoliation_mean",
-            ax=_ax,
-            xlim=(0, 100),
-            plot_type=PlotType.LINE,
-            linewidth=4.0,
-            show_no_effect=False,
-            ylim=(-15, 10),
-        )
-        plot_dependence(
-            all_results[_sp],
-            feature="defoliation_max",
-            ax=_ax,
-            xlim=(0, 100),
-            color="#ff7f0e",
-            plot_type=PlotType.LINE,
-            linewidth=4.0,
-            show_no_effect=False,
-            ylim=(-15, 10),
-            with_density=False,
-        )
-        _ax.set_title(_sp.capitalize())
-        _ax.set_xlabel("Defoliation [%]")
-        _ax.set_ylabel("SHAP value [percentile rank %]")
-
-    _fig.legend(
-        title="Feature",
-        labels=[
-            "Mean defoliation (μ)",
-            "Mean defoliation (95p)",
-            "Max defoliation (μ)",
-            "Max defoliation (95p)",
-        ],
-    )
-    _fig.suptitle("Dependence of growth rate on mean and max defoliation")
     plt.tight_layout()
     plt.gca()
     return

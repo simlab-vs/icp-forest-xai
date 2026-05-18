@@ -25,7 +25,7 @@ def _feature_label(feature: str) -> str:
 
 class PlotType(Enum):
     SCATTER = "scatter"
-    LINE = "line"
+    MEAN_BAND = "mean_band"
     DENSITY = "density"
 
 
@@ -46,7 +46,10 @@ def plot_dependence(
     scatter_color: str = "#C3CDDA",
     plot_type: PlotType = PlotType.SCATTER,
     with_density: bool = True,
+    density_color: str | None = None,
     show_mean_band: bool = True,
+    n_bins: int = 30,
+    connect_gaps: bool = False,
     **kwargs: Any,
 ) -> Axes:
     """Plot SHAP dependence plot for a given feature.
@@ -158,18 +161,7 @@ def plot_dependence(
     xwidth = xlim[1] - xlim[0]
     ywidth = ylim[1] - ylim[0]
 
-    # Convert to percentage for better interpretability
-    if plot_type == PlotType.LINE:
-        sns.lineplot(
-            x=feature_values[valid_indices],
-            y=shap_values[valid_indices],
-            ax=ax,
-            color=color,
-            label=label,
-            errorbar=("pi", 95),
-            **kwargs,
-        )
-    elif plot_type == PlotType.SCATTER:
+    if plot_type == PlotType.SCATTER:
         wiggle = 0.005
         xwiggle = np.random.uniform(
             -wiggle * xwidth,
@@ -195,7 +187,6 @@ def plot_dependence(
         )
 
         if fit_func is not None:
-            # Fit a power-law curve to the data
             from scipy.optimize import curve_fit
 
             popt, _ = curve_fit(
@@ -208,72 +199,90 @@ def plot_dependence(
             x_fit = np.linspace(xlim[0], xlim[1], 100)
             y_fit = fit_func(x_fit, *popt)
 
-            if fit_formula is not None:
-                label = f"${fit_formula.format(*popt)}$"
-            else:
-                label = "Fitted curve"
+            _fit_label = (
+                f"${fit_formula.format(*popt)}$"
+                if fit_formula is not None
+                else "Fitted curve"
+            )
+            ax.plot(
+                x_fit, y_fit, color="k", linestyle="--", linewidth=2, label=_fit_label
+            )
+            ax.legend([_fit_label])
 
-            ax.plot(x_fit, y_fit, color="k", linestyle="--", linewidth=2, label=label)
+    if plot_type == PlotType.MEAN_BAND or (
+        plot_type == PlotType.SCATTER and show_mean_band
+    ):
+        from scipy.ndimage import gaussian_filter1d
 
-            if label is not None:
-                ax.legend([label])
-
-    if plot_type == PlotType.SCATTER and show_mean_band:
-        from scipy.interpolate import make_interp_spline
-
-        _fv = feature_values[valid_indices]
-        _sv = shap_values[valid_indices]
-        _n_bins = 30
-        _edges = np.linspace(xlim[0], xlim[1], _n_bins + 1)
-        _centers = 0.5 * (_edges[:-1] + _edges[1:])
-        _ids = np.searchsorted(_edges[1:-1], _fv, side="right")
-        _bmeans = np.full(_n_bins, np.nan)
-        _bq025 = np.full(_n_bins, np.nan)
-        _bq975 = np.full(_n_bins, np.nan)
-        for _b in range(_n_bins):
-            _m = _ids == _b
-            if _m.sum() >= 2:
-                _bmeans[_b] = _sv[_m].mean()
-                _bq025[_b] = np.percentile(_sv[_m], 2.5)
-                _bq975[_b] = np.percentile(_sv[_m], 97.5)
-        # Split into contiguous populated segments so empty bins create visible gaps.
-        _ok = ~np.isnan(_bmeans)
-        _changes = np.diff(_ok.astype(int), prepend=0, append=0)
-        _seg_starts = np.where(_changes == 1)[0]
-        _seg_ends = np.where(_changes == -1)[0]
-        for _s, _e in zip(_seg_starts, _seg_ends):
-            _bc = _centers[_s:_e]
-            _bm = _bmeans[_s:_e]
-            _blo = _bq025[_s:_e]
-            _bhi = _bq975[_s:_e]
-            if len(_bc) == 1:
-                _xs = np.array([_edges[_s], _edges[_e]])
+        fv = feature_values[valid_indices]
+        sv = shap_values[valid_indices]
+        edges = np.linspace(xlim[0], xlim[1], n_bins + 1)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        ids = np.searchsorted(edges[1:-1], fv, side="right")
+        bmeans = np.full(n_bins, np.nan)
+        bq025 = np.full(n_bins, np.nan)
+        bq975 = np.full(n_bins, np.nan)
+        for b in range(n_bins):
+            m = ids == b
+            if m.sum() >= 2:
+                bmeans[b] = sv[m].mean()
+                bq025[b] = np.percentile(sv[m], 2.5)
+                bq975[b] = np.percentile(sv[m], 97.5)
+        ok = ~np.isnan(bmeans)
+        if connect_gaps:
+            segments = [(centers[ok], bmeans[ok], bq025[ok], bq975[ok])]
+        else:
+            changes = np.diff(ok.astype(int), prepend=0, append=0)
+            seg_starts = np.where(changes == 1)[0]
+            seg_ends = np.where(changes == -1)[0]
+            segments = [
+                (centers[s:e], bmeans[s:e], bq025[s:e], bq975[s:e])
+                for s, e in zip(seg_starts, seg_ends)
+            ]
+        lw = kwargs.get("linewidth", 2)
+        first = True
+        for bc, bm, blo, bhi in segments:
+            seg_label = (label or feature) if first else "_nolegend_"
+            seg_ci_label = ((label or feature) + "__ci") if first else "_nolegend_"
+            first = False
+            if len(bc) == 1:
+                hw = (edges[1] - edges[0]) / 2
+                xs = np.array([bc[0] - hw, bc[0] + hw])
+                ax.plot(
+                    xs,
+                    [bm[0], bm[0]],
+                    color=color,
+                    linewidth=lw,
+                    zorder=4,
+                    label=seg_label,
+                )
                 ax.fill_between(
-                    _xs,
-                    [_blo[0], _blo[0]],
-                    [_bhi[0], _bhi[0]],
+                    xs,
+                    [blo[0], blo[0]],
+                    [bhi[0], bhi[0]],
                     alpha=0.25,
                     color=color,
                     zorder=3,
                     linewidth=0,
+                    label=seg_ci_label,
                 )
-                ax.plot(_xs, [_bm[0], _bm[0]], color=color, linewidth=2, zorder=4)
                 continue
-            _k = min(3, len(_bc) - 1)
-            _xs = np.linspace(_bc[0], _bc[-1], max(30, len(_bc) * 10))
-            _mean_s = make_interp_spline(_bc, _bm, k=_k)(_xs)
-            _lo_s = make_interp_spline(_bc, _blo, k=_k)(_xs)
-            _hi_s = make_interp_spline(_bc, _bhi, k=_k)(_xs)
+            sigma = max(1.0, len(bc) / 15)
+            xs = np.linspace(bc[0], bc[-1], max(30, len(bc) * 10))
+            mean_s = np.interp(xs, bc, gaussian_filter1d(bm, sigma=sigma))
+            lo_s = np.interp(xs, bc, gaussian_filter1d(blo, sigma=sigma))
+            hi_s = np.interp(xs, bc, gaussian_filter1d(bhi, sigma=sigma))
+            ax.plot(xs, mean_s, color=color, linewidth=lw, zorder=4, label=seg_label)
             ax.fill_between(
-                _xs,
-                _lo_s,
-                _hi_s,
+                xs,
+                lo_s,
+                hi_s,
                 alpha=0.25,
                 color=color,
                 zorder=3,
                 linewidth=0,
+                label=seg_ci_label,
             )
-            ax.plot(_xs, _mean_s, color=color, linewidth=2, zorder=4)
 
     if plot_type == PlotType.DENSITY or with_density:
         # Overlaid inset axes for histogram with the same x-axis limits
@@ -302,10 +311,10 @@ def plot_dependence(
             x=feature_values[valid_indices],
             legend=False,
             ax=ax2,
-            bins=50,
+            bins=n_bins,
             binrange=xlim,
             stat="density",
-            color="grey",
+            color=density_color or "grey",
             alpha=0.3,
             edgecolor=None,
         )
@@ -334,9 +343,8 @@ def plot_dependence(
     ax.set_ylim(ylim)
 
     fig = ax.get_figure()
-
     if fig is not None and isinstance(fig, Figure):
-        fig.tight_layout()
+        fig.sca(ax)
 
     return ax
 
