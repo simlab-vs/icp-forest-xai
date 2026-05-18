@@ -43,6 +43,18 @@ def summarize_performance(
     group_col: str,
     precision: int = 2,
 ) -> pl.DataFrame:
+    tree_counts = pl.DataFrame(
+        [
+            {
+                "species": species,
+                "n_trees": results.metadata["tree_id"].n_unique()
+                if "tree_id" in results.metadata.columns
+                else results.metadata["plot_id"].n_unique(),
+            }
+            for species, results in all_results.items()
+        ]
+    )
+
     perf = pl.concat(
         [
             pl.from_dicts(results.performances).select(
@@ -74,15 +86,16 @@ def summarize_performance(
             pl.mean("n_test").round().cast(pl.Int32).alias("n_test"),
             pl.mean("n_train").round().cast(pl.Int32).alias("n_train"),
         )
+        .join(tree_counts, on="species", how="left")
         .with_columns(
-            weight_test=pl.col("n_test") / pl.sum("n_test").over(pl.lit(True)),
-            weight_train=pl.col("n_train") / pl.sum("n_train").over(pl.lit(True)),
+            weight_test=pl.col("n_trees") / pl.sum("n_trees").over(pl.lit(True)),
+            weight_train=pl.col("n_trees") / pl.sum("n_trees").over(pl.lit(True)),
         )
         .with_columns(
             weight_test_r2=pl.col("weight_test") * pl.col("mean_test_r2"),
             weight_test_rmse=pl.col("weight_test") * pl.col("mean_test_rmse"),
             weight_train_r2=pl.col("weight_train") * pl.col("mean_train_r2"),
-            weight_train_rmse=pl.col("weight_test") * pl.col("mean_train_rmse"),
+            weight_train_rmse=pl.col("weight_train") * pl.col("mean_train_rmse"),
         )
         .select(
             "species",

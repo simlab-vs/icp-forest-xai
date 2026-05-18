@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.2"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
@@ -255,7 +255,7 @@ def _(mo):
     group_col_ui = mo.ui.dropdown(
         ["tree_id", "plot_id", "none"], value="tree_id", label="Group by"
     )
-    temporal_cv_ui = mo.ui.switch(value=True, label="Temporal CV")
+    temporal_cv_ui = mo.ui.switch(value=False, label="Temporal CV")
     weight_shap_ui = mo.ui.switch(value=True, label="Weight SHAP by n")
 
     mo.hstack(
@@ -691,6 +691,8 @@ def _(
     all_results,
     dep_feature_ui,
     dep_species_ui,
+    mo,
+    np,
     plot_dependence,
     plt,
 ):
@@ -698,22 +700,123 @@ def _(
     _species_sel = dep_species_ui.value
     _species_list = ALL_SPECIES if _species_sel == "all" else [_species_sel]
 
+    _available_features = list(
+        all_results[_species_list[0]].shap_values[0].feature_names
+    )
+    mo.stop(
+        _feature not in _available_features,
+        mo.callout(
+            mo.md(
+                f"Feature **{_feature}** is not available in the current ablation. "
+                f"Available features: {', '.join(_available_features)}"
+            ),
+            kind="warn",
+        ),
+    )
+
     _n = len(_species_list)
+
+    # Compute shared x and y ranges across all selected species so every
+    # subplot is directly comparable.
+    _all_fv, _all_sv = [], []
+    for _sp in _species_list:
+        for _f in range(all_results[_sp].num_folds):
+            _sl = all_results[_sp].shap_values[_f][:, _feature]
+            _all_fv.append(_sl.data.astype(np.float64))
+            _all_sv.append(_sl.values.astype(np.float64))
+    _all_fv = np.concatenate(_all_fv)
+    _all_sv = np.concatenate(_all_sv) * 100  # plot_dependence uses percentage
+
+    _valid_fv = _all_fv[~np.isnan(_all_fv)]
+    _valid_sv = _all_sv[~np.isnan(_all_sv)]
+    _global_xlim = (float(_valid_fv.min()), 60)  # float(_valid_fv.max()))
+    _global_ylim = (float(_valid_sv.min()), float(_valid_sv.max()))
+
     _fig, _axes = plt.subplots(
-        (_n + 1) // 2, min(_n, 2), figsize=(12, 4 * ((_n + 1) // 2)), squeeze=False
+        (_n + 1) // 2,
+        min(_n, 2),
+        figsize=(12, 4 * ((_n + 1) // 2)),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
     )
 
     for _i, (_sp, _ax) in enumerate(zip(_species_list, _axes.flatten())):
         plot_dependence(
             all_results[_sp],
             feature=_feature,
-            alpha=0.3,
+            alpha=0.25,
             ax=_ax,
+            xlim=_global_xlim,
+            ylim=_global_ylim,
+            scatter_color="#C6CDDA",
         )
 
     for _j in range(_i + 1, len(_axes.flatten())):
         _axes.flatten()[_j].set_visible(False)
 
+    # sharex=True suppresses tick labels on non-bottom rows; restore them.
+    for _ax in _axes.flatten()[: _i + 1]:
+        _ax.tick_params(axis="x", labelbottom=True)
+
+    plt.tight_layout()
+    plt.gca()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Defoliation analysis
+    """)
+    return
+
+
+@app.cell
+def _(ALL_SPECIES, PlotType, all_results, plot_dependence, plt):
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    for sp, ax in zip(ALL_SPECIES, axes.flatten()):
+        plot_dependence(
+            all_results[sp],
+            feature="defoliation_mean",
+            ax=ax,
+            xlim=(0, 100),
+            plot_type=PlotType.MEAN_BAND,
+            linewidth=2.0,
+            show_no_effect=False,
+            n_bins=50,
+            ylim=(-15, 10),
+            density_color="#1f77b4",
+        )
+        plot_dependence(
+            all_results[sp],
+            feature="defoliation_max",
+            ax=ax,
+            xlim=(0, 100),
+            color="#ff7f0e",
+            plot_type=PlotType.MEAN_BAND,
+            linewidth=2.0,
+            ylim=(-15, 10),
+            n_bins=50,
+            with_density=True,
+            density_color="#ff7f0e",
+            connect_gaps=True,
+        )
+        ax.set_title(sp.capitalize())
+        ax.set_xlabel("Defoliation (mean/max) [%]")
+        ax.set_ylabel("SHAP value [percentile rank %]")
+
+    fig.legend(
+        title="Feature",
+        labels=[
+            "Mean defoliation (μ)",
+            "Mean defoliation (95p)",
+            "Max defoliation (μ)",
+            "Max defoliation (95p)",
+        ],
+        loc="outside upper right",
+    )
     plt.tight_layout()
     plt.gca()
     return
@@ -762,60 +865,6 @@ def _(
         all_results[_sp], top_n=_top_n_features, ax=_ax, vmax=0.006
     )
     plt.title(f"Feature interactions — {_sp.capitalize()}")
-    plt.tight_layout()
-    plt.gca()
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ## Defoliation analysis
-    """)
-    return
-
-
-@app.cell
-def _(ALL_SPECIES, PlotType, all_results, plot_dependence, plt):
-    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8))
-
-    for _sp, _ax in zip(ALL_SPECIES, _axes.flatten()):
-        plot_dependence(
-            all_results[_sp],
-            feature="defoliation_mean",
-            ax=_ax,
-            xlim=(0, 100),
-            plot_type=PlotType.LINE,
-            linewidth=4.0,
-            show_no_effect=False,
-            ylim=(-15, 10),
-        )
-        plot_dependence(
-            all_results[_sp],
-            feature="defoliation_max",
-            ax=_ax,
-            xlim=(0, 100),
-            color="#ff7f0e",
-            plot_type=PlotType.LINE,
-            linewidth=4.0,
-            show_no_effect=False,
-            ylim=(-15, 10),
-            with_density=False,
-        )
-        _ax.set_title(_sp.capitalize())
-        _ax.set_xlabel("Defoliation [%]")
-        _ax.set_ylabel("SHAP value [percentile rank %]")
-
-    _fig.legend(
-        title="Feature",
-        labels=[
-            "Mean defoliation (μ)",
-            "Mean defoliation (95p)",
-            "Max defoliation (μ)",
-            "Max defoliation (95p)",
-        ],
-    )
-    _fig.suptitle("Dependence of growth rate on mean and max defoliation")
     plt.tight_layout()
     plt.gca()
     return
